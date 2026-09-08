@@ -11,9 +11,12 @@ Execution is fire-and-forget: run_command.py spawns the command detached
 immediately. Follow the process in docker/lazydocker or tail the log.
 
 Keys:
-  Enter   -> Run the selected command (detached)
-  x       -> Open the Commands menu (scrolling: arrows, Enter selects)
-  n       -> Define + save a new command
+  ↑ / ↓ .. move through the command list
+  ← / → .. move the cursor inside the wizard's text fields
+  Enter   -> Run the highlighted command (detached)
+  n       -> Define + save a new command (central dialog)
+  e       -> Edit the highlighted command
+  d       -> Delete the highlighted command (y/N confirm)
   t       -> Cycle theme (saved between runs)
   ?       -> Help overlay
   q / Esc -> Quit
@@ -82,15 +85,6 @@ def save_commands(commands: dict, selected: str) -> bool:
         return False
 
 
-def command_summary(v: dict) -> str:
-    """Compact one-line summary for the menu: the description, or a
-    clipped command if the entry has none."""
-    desc = (v.get("desc") or "").strip()
-    if desc:
-        return desc
-    return (v.get("cmd") or "").strip()
-
-
 # ============================================================
 #  THEMES
 # ============================================================
@@ -151,6 +145,8 @@ def apply_theme(stdscr, name: str) -> str:
 def draw_hint(stdscr, row, col, text, width):
     """Render a hint line with bracketed keys ([x], [n], ...) in the
     theme's button accent, so they read as pressable buttons."""
+    if row >= stdscr.getmaxyx()[0] - 1:   # very short screen: skip the line
+        return
     key_attr = curses.color_pair(6) | curses.A_BOLD
     c = col
     for seg in re.split(r"(\[[^\]]+\])", text):
@@ -205,41 +201,259 @@ def prepend_log(log: str, entry: str) -> str:
 #  COMMAND WIZARD
 # ============================================================
 
-def prompt(stdscr, sh: int, sw: int, label: str, default: str = "") -> str | None:
-    """Blocking text prompt on the footer row. None on Esc."""
-    stdscr.timeout(-1)
-    curses.echo()
-    stdscr.move(sh - 1, 0)
-    stdscr.clrtoeol()
-    stdscr.addnstr(sh - 1, 0, f"{label} [{default}]: ", sw)
-    stdscr.refresh()
-    res = stdscr.getstr()
-    curses.noecho()
-    stdscr.timeout(100)
-    raw = res[1] if isinstance(res, tuple) else res  # ncurses returns (n, b) or bare bytes
-    text = raw.decode(errors="replace").strip()
-    if text.startswith("\x1b"):   # Esc then Enter = cancel
+def _prompt_key(stdscr) -> str | tuple[str, str] | None:
+    """Read one key and resolve it into a line-editor action: 'esc',
+    'enter', 'backspace', 'delete', 'left', 'right', 'home', 'end', or
+    ('char', ch). Arrow keys arrive as keypad constants (KEY_LEFT, ...) or
+    as raw ESC [ C/D sequences; both are decoded here so they can never
+    corrupt the text buffer."""
+    c = stdscr.getch()
+    if c == -1:
+        return "timeout"
+    if c in (10, 13, curses.KEY_ENTER):
+        return "enter"
+    if c in (8, 127, curses.KEY_BACKSPACE, curses.KEY_DC):
+        return "backspace"
+    # Keypad mode (on by default under curses.wrapper) delivers arrow keys
+    # as constants, not escape sequences — decode them before the "plain
+    # key" check so they move the cursor instead of being dropped.
+    if c == curses.KEY_LEFT:
+        return "left"
+    if c == curses.KEY_RIGHT:
+        return "right"
+    if c == curses.KEY_HOME:
+        return "home"
+    if c == curses.KEY_END:
+        return "end"
+    if c != 27:
+        if 32 <= c < 256:
+            return ("char", chr(c))
         return None
-    return text if text else default
+    # Escape: either a bare Esc (cancel) or the start of a key sequence.
+    stdscr.timeout(30)
+    c2 = stdscr.getch()
+    stdscr.timeout(-1)
+    if c2 not in (ord("["), ord("O")):
+        return "esc"
+    c3 = stdscr.getch()
+    if c3 == ord("C"):
+        return "right"
+    if c3 == ord("D"):
+        return "left"
+    if c3 == ord("H"):
+        return "home"
+    if c3 == ord("F"):
+        return "end"
+    if c3 == ord("3"):
+        stdscr.getch()   # consume '~'
+        return "delete"
+    if c3 == ord("1"):
+        stdscr.getch()
+        return "home"
+    if c3 == ord("4"):
+        stdscr.getch()
+        return "end"
+    if c3 == -1:
+        return None     # split sequence (27, '[' then timeout): ignore, never cancel
+    return "esc"
 
 
-def new_command(stdscr, sh: int, sw: int, commands: dict) -> tuple[str, str]:
-    """Define and save a new command. Returns (name, log_msg)."""
-    name = prompt(stdscr, sh, sw, "Command name", "mycmd")
+def _main_getch(stdscr) -> int | str:
+    """Read one key for the main screen. Returns a curses key code (or -1)
+    for plain keys, and "up"/"down" for arrow keys — decoded from both the
+    keypad constants and raw ESC [ A/B sequences, so ↑/↓ work with or
+    without keypad(). Left/right arrive as KEY_LEFT/KEY_RIGHT (keypad on)
+    or ESC [ C/D (keypad off) and both map to "noop". A bare Esc arrives as 27; a split arrow sequence
+    (27, '[' then timeout) is dropped, never treated as Esc."""
+    c = stdscr.getch()
+    if c != 27:
+        return c
+    stdscr.timeout(30)
+    c2 = stdscr.getch()
+    stdscr.timeout(100)
+    if c2 not in (ord("["), ord("O")):
+        return 27
+    c3 = stdscr.getch()
+    if c3 == ord("A"):
+        return "up"
+    if c3 == ord("B"):
+        return "down"
+    if c3 in (ord("C"), ord("D")):
+        return "noop"   # left/right: no function in the main view
+    if c3 == -1:
+        return -1   # split sequence: ignore
+    return 27       # unrecognized sequence: treat as Esc
+
+
+def _edit_loop(stdscr, initial: str, render) -> str | None:
+    """Shared line-editor loop. `render(text, cur)` draws the full current
+    state (the wizard redraws its whole box; it owns the layout).
+    Returns the stripped text on Enter, None on Esc. The buffer is
+    unbounded — render() decides which slice is visible. Arrows move the
+    cursor only; Backspace/Delete change the text."""
+    text = initial
+    cur = len(initial)
+    render(text, cur)
+    try:
+        stdscr.timeout(-1)
+        while True:
+            act = _prompt_key(stdscr)
+            if act == "timeout":
+                continue
+            if act == "esc":
+                return None
+            if act == "enter":
+                return text.strip()
+            if act == "backspace":
+                if cur > 0:
+                    text = text[:cur - 1] + text[cur:]
+                    cur -= 1
+            elif act == "delete":
+                if cur < len(text):
+                    text = text[:cur] + text[cur + 1:]
+            elif act == "left":
+                cur = max(0, cur - 1)
+            elif act == "right":
+                cur = min(len(text), cur + 1)
+            elif act == "home":
+                cur = 0
+            elif act == "end":
+                cur = len(text)
+            elif act is not None:   # ("char", ch)
+                ch = act[1]
+                text = text[:cur] + ch + text[cur:]
+                cur += len(ch)
+            render(text, cur)
+    finally:
+        stdscr.timeout(100)
+
+
+def _name_error(name: str, commands: dict, old_name: str) -> str:
+    """Validate a (possibly new) command name. Returns '' when OK."""
     if not name:
-        return "", "[command] cancelled"
+        return "name cannot be empty"
     if name == "selected":
-        return "", "[command] name 'selected' is reserved"
-    if name in commands:
-        return "", f"[command] '{name}' already exists"
-    desc = prompt(stdscr, sh, sw, "Description")
-    if desc is None:
-        return "", "[command] cancelled"
-    cmd = prompt(stdscr, sh, sw, "Shell command")
-    if cmd is None:
-        return "", "[command] cancelled"
-    commands[name] = {"desc": desc, "cmd": cmd}
-    return name, f"[command] saved '{name}'"
+        return "name 'selected' is reserved"
+    if name != old_name and name in commands:
+        return f"'{name}' already exists"
+    return ""
+
+
+def draw_wizard_box(stdscr, sh, sw, top, left, bw, bh, title, values, active_i,
+                    error, active_text, active_cur):
+    """Draw the wizard box: border, title, the three fields (the active one
+    with the live editor text + reverse-video cursor), hint, error line."""
+    labels = ("Command name", "Description", "Shell command")
+    keys = ("name", "desc", "cmd")
+    attr = curses.color_pair(4)
+    H, W = stdscr.getmaxyx()
+    for r in range(top, top + bh):
+        if r < H - 1:
+            stdscr.addnstr(r, left, " " * bw, bw)
+    for r in range(top, top + bh):
+        if r >= H - 1:
+            break
+        stdscr.addch(r, left, "┌" if r == top else ("└" if r == top + bh - 1 else "│"))
+        stdscr.addch(r, left + bw - 1, "┐" if r == top else ("┘" if r == top + bh - 1 else "│"))
+    stdscr.addnstr(top, left + 1, "─" * (bw - 2), bw - 2, attr)
+    stdscr.addnstr(top + bh - 1, left + 1, "─" * (bw - 2), bw - 2, attr)
+    stdscr.addnstr(top, left + 2, title, bw - 4, curses.color_pair(3) | curses.A_BOLD)
+    for fi, (label, key) in enumerate(zip(labels, keys)):
+        row = top + 2 + fi
+        if row >= H - 1:
+            break
+        is_active = fi == active_i
+        text = active_text if is_active else values[key]
+        lbl_attr = curses.color_pair(4) | curses.A_BOLD if is_active else curses.color_pair(4)
+        stdscr.addnstr(row, left + 2, label + ":", bw - 4, lbl_attr)
+        tcol = left + 2 + len(label) + 1
+        twidth = max(1, bw - 4 - len(label) - 1)
+        if is_active:
+            # visible slice around the cursor (the field scrolls, not the box)
+            start = max(0, min(active_cur - 1, len(active_text) - twidth)) if len(active_text) > twidth else 0
+            pre = active_text[start:active_cur]
+            post = active_text[active_cur + 1: start + twidth]
+            stdscr.addnstr(row, tcol, pre, twidth)
+            ch = active_text[active_cur] if active_cur < len(active_text) else " "
+            stdscr.addch(row, tcol + len(pre), ch, curses.A_REVERSE)
+            stdscr.addnstr(row, tcol + len(pre) + 1, post, twidth - len(pre) - 1)
+        else:
+            stdscr.addnstr(row, tcol, text, twidth)
+    stdscr.addnstr(top + 5, left + 2, "[Enter] next field    [Esc] cancel", bw - 4, attr)
+    if error:
+        stdscr.addnstr(top + bh - 1, left + 1, error, bw - 2, curses.color_pair(2))
+
+
+def command_wizard(stdscr, sh, sw, commands, old_name="", desc="", cmd="") -> tuple[str, str, str] | None:
+    """Central overlay for defining (old_name='') or editing a command.
+    Returns (name, desc, cmd) on save, None on Esc."""
+    bw = max(10, min(60, sw - 2))
+    bh = 8
+    top = max(0, (sh - bh) // 2)
+    left = max(1, (sw - bw) // 2)
+    title = f"Edit: {old_name}" if old_name else "New command"
+    values = {"name": old_name, "desc": desc, "cmd": cmd}
+    keys = ("name", "desc", "cmd")
+    error = ""
+    i = 0
+    while i < len(keys):
+        key = keys[i]
+
+        def render(text, cur, key=key, i=i):
+            draw_wizard_box(stdscr, sh, sw, top, left, bw, bh, title, values, i,
+                            error, text, cur)
+
+        res = _edit_loop(stdscr, values[key], render)
+        if res is None:
+            return None
+        if key == "name":
+            err = _name_error(res, commands, old_name)
+            if err:
+                error = err
+                continue   # re-prompt the name field
+            error = ""
+        values[key] = res
+        i += 1
+    return values["name"], values["desc"], values["cmd"]
+
+
+def confirm(stdscr, sh, sw, question: str) -> bool:
+    """Small centered y/N confirm box. True on y/Y, False on n/N/q/Esc."""
+    bw = max(10, min(sw - 2, len(question) + 8))
+    top = max(1, (sh - 4) // 2)
+    left = max(1, (sw - bw) // 2)
+    attr = curses.color_pair(4)
+    H, W = stdscr.getmaxyx()
+
+    def draw():
+        for r in range(top, top + 3):
+            if r < H - 1:
+                stdscr.addnstr(r, left, " " * bw, bw)
+        for r, tc, bc in ((top, "┌", "┐"), (top + 1, "│", "│"), (top + 2, "└", "┘")):
+            if r < H - 1:
+                stdscr.addch(r, left, tc, attr)
+                stdscr.addch(r, left + bw - 1, bc, attr)
+        if top < H - 1:
+            stdscr.addnstr(top, left + 1, "─" * (bw - 2), bw - 2, attr)
+        if top + 2 < H - 1:
+            stdscr.addnstr(top + 2, left + 1, "─" * (bw - 2), bw - 2, attr)
+        if top < H - 1:
+            stdscr.addnstr(top, left + 2, question, bw - 4, curses.color_pair(4) | curses.A_BOLD)
+        if top + 1 < H - 1:
+            stdscr.addnstr(top + 1, left + 2, "[y] yes    [n] no", bw - 4, attr)
+        stdscr.refresh()
+
+    draw()
+    stdscr.timeout(-1)
+    try:
+        while True:
+            c = stdscr.getch()
+            if c in (ord("y"), ord("Y")):
+                return True
+            if c in (ord("n"), ord("N"), ord("q"), 27):
+                return False
+    finally:
+        stdscr.timeout(100)
 
 
 # ============================================================
@@ -259,15 +473,14 @@ BANNER = [
 BANNER_ROWS = len(BANNER)   # 5
 
 HELP_TEXT = [
-    "  Enter ... run the selected command (detached)",
-    "  x ...... open the Commands menu (Esc/q close)",
-    "  arrows . move the cursor inside the menu",
-    "  Enter . select the cursor command + close menu",
+    "  ↑ / ↓ .. move through the command list",
+    "  Enter .. run the highlighted command (detached)",
     "  n ...... define + save a new command",
-    "  d ...... delete the cursor command (menu open)",
+    "  e ...... edit the highlighted command",
+    "  d ...... delete the highlighted command (y/N)",
     "  t ...... cycle color theme",
     "  q / Esc . quit",
-    "  Esc+Enter cancels a prompt",
+    "  fields  . arrows move, Bksp/Del edit, Enter next, Esc cancel",
     "  ? ...... toggle this help",
     "",
     "  Commands: ~/.config/jumpstart/commands.json",
@@ -283,9 +496,6 @@ def main(stdscr):
     commands, selected = load_state()
 
     help_overlay = False
-    menu_open = False
-    menu_cursor = 0
-    last_run: dict = {}   # {name, pid, log} of the most recent run
     log = ""
     # UI tick: getch returns -1 after 100ms -> smooth redraws.
     stdscr.timeout(100)
@@ -294,11 +504,8 @@ def main(stdscr):
     # buffer (erase + redraw); refresh() diffs it against the physical
     # screen and pushes only the changed cells (steady state: none).
     while True:
-        if menu_open:
-            hint = "[↑↓] move  [Enter] select  [n] new  [d] delete  [Esc/q] close"
-        else:
-            hint = "[Enter] Run [x] Commands [n] New [t] Theme [q] Quit [?] Help"
-
+        hint = ("[↑↓] move  [Enter] run  [n] new  [e] edit  [d] delete  "
+                "[t] theme  [q] quit  [?] help")
         log_lines = (log or "(no action yet)").splitlines()
 
         # --- render ------------------------------------------------------
@@ -309,8 +516,6 @@ def main(stdscr):
         def border(win, H, W):
             """Single-line frame on the screen edge (drawn last: owns the
             corners and any content bleed). Needs 4x10 minimum."""
-            # stdscr cannot write the true bottom row/col, so the frame
-            # is drawn on the safe bounds (one cell in from the edge).
             if H < 4 or W < 10:
                 return
             attr = curses.color_pair(4)
@@ -324,108 +529,120 @@ def main(stdscr):
                 win.addnstr(r, 0, "│", 1, attr)
                 win.addnstr(r, W - 2, "│", 1, attr)
 
-        PAD = 4     # horizontal indent (padding) for the banner block
-        TOP = 1     # blank row above the banner
+        PAD = 4
+        TOP = 1
         def divider(row):
             if row < sh:
                 stdscr.addnstr(row, 0, ("─" * sw), sw)
 
-        # ASCII title: "JUMP" (header) + "START" (body)
+        # ASCII title: "JUMP" (header) + "START" (body) — clamped to the
+        # safe height AND width so small screens never get out-of-bounds
+        # writes (addnstr's n is "max chars", not "max columns").
         for r, (left, right) in enumerate(BANNER):
-            stdscr.addnstr(TOP + r, PAD, left, sw, curses.color_pair(3) | curses.A_BOLD)
+            if TOP + r >= sh:
+                break
+            stdscr.addnstr(TOP + r, PAD, left, max(0, sw - PAD),
+                           curses.color_pair(3) | curses.A_BOLD)
             # +2: breathing space between "JUMP" and "START"
-            stdscr.addnstr(TOP + r, PAD + len(left) + 2, right, sw, curses.color_pair(4))
+            col2 = PAD + len(left) + 2
+            if col2 < sw:
+                stdscr.addnstr(TOP + r, col2, right, sw - col2, curses.color_pair(4))
         divider(TOP + BANNER_ROWS)
 
-        # --- status: selected command + its description ---
-        status_row = TOP + BANNER_ROWS + 1
-        stdscr.addnstr(status_row, PAD, "selected:", sw,
-                       curses.color_pair(4) | curses.A_BOLD)
-        sel_name = selected if selected in commands else ""
-        stdscr.addnstr(status_row, PAD + 12, sel_name or "(none)", sw,
-                       curses.color_pair(1) if sel_name else curses.color_pair(2), )
-        desc = (commands.get(selected, {}).get("desc") or "").strip() if sel_name else ""
-        stdscr.addnstr(status_row + 1, PAD, f"desc: {desc}" if desc else "desc: (none)",
-                       sw, curses.color_pair(4))
-
         # --- button hints ---
-        divider(status_row + 2)
-        hint_row = status_row + 3
+        hint_row = TOP + BANNER_ROWS + 1
         draw_hint(stdscr, hint_row, PAD, hint, sw)
 
-        # --- main area: commands menu, help, or the selected command ---
+        # --- main area: two columns — names (left) + details (right) ---
         divider(hint_row + 1)
         main_row = hint_row + 2
-        available = max(0, (sh - 2) - (main_row + 1))   # rows left for main content
+        names = list(commands)
+        if selected not in names:
+            selected = names[0] if names else ""
+        sel_idx = names.index(selected) if selected in names else -1
+        # The log panel is anchored to the bottom of the screen (its header
+        # sits 2 rows above the footer, leaving room for up to 2 lines);
+        # the main list area gets whatever rows are left above it.
+        log_h = max(0, min(3, (sh - 2) - main_row))
+        fit = max(0, (sh - 2) - main_row - log_h)   # rows for the list area
         last_used = main_row
-        if menu_open:
-            names = list(commands)
-            menu_cursor = min(max(0, menu_cursor), max(0, len(names) - 1))
-            # keep the cursor visible: scroll the list, not the screen
-            top_idx = max(0, menu_cursor - (available - 5))
-            visible = names[top_idx:]
-            stdscr.addnstr(main_row, PAD, "Commands:  [↑↓] move  [Enter] select"
-                                              "  [n] new  [d] delete", sw,
-                           curses.color_pair(4) | curses.A_BOLD)
-            for i, name in enumerate(visible):
-                is_cur = name == names[top_idx + i]
-                mark = "*" if name == selected else " "
-                row_attr = curses.color_pair(1) | curses.A_BOLD if (is_cur or mark == "*") \
-                    else curses.color_pair(4)
-                stdscr.addnstr(main_row + 1 + i, PAD + 1, f"{mark} {name}", sw, row_attr)
-                stdscr.addnstr(main_row + 1 + i, PAD + 18, command_summary(commands[name]),
-                               sw, curses.color_pair(4))
-            if not names:
-                stdscr.addnstr(main_row + 1, PAD + 1, "(no commands — press n)",
-                               sw, curses.color_pair(2))
-                last_used = main_row + 1
-            else:
-                last_used = main_row + min(len(visible), available - 1)
-        elif not help_overlay:
-            if sel_name:
-                cmd = (commands[selected].get("cmd") or "").strip()
-                wrapped = textwrap.fill(cmd, width=max(10, sw - PAD - 2)) \
-                    if cmd else "(empty command)"
+        if not help_overlay and names:
+            left_w = max(10, min(30, sw // 4))
+            right_col = PAD + left_w + 3   # one blank column after the divider
+            list_fit = max(0, fit - 2)    # header + empty spacer row + list rows
+            # header row: column titles (header color, like the "JUMP" word)
+            if fit >= 1:
+                stdscr.addnstr(main_row, PAD, "NAME", left_w, curses.color_pair(3) | curses.A_BOLD)
+                stdscr.addnstr(main_row, right_col, "DESCRIPTION / COMMAND", max(0, sw - right_col),
+                               curses.color_pair(3) | curses.A_BOLD)
+            # vertical divider between the name list and the details column:
+            # runs from the header row down through the whole list area
+            div_col = PAD + left_w + 1
+            for i in range(fit):
+                if main_row + i < h - 1:
+                    stdscr.addch(main_row + i, div_col, "\u2502", curses.color_pair(4))
+            # keep the highlighted row visible: scroll the list, not the screen
+            top_idx = max(0, min(sel_idx - list_fit + 1, len(names) - list_fit)) if sel_idx >= list_fit else 0
+            for i in range(list_fit):
+                idx = top_idx + i
+                if idx >= len(names):
+                    break
+                name = names[idx]
+                is_sel = name == selected
+                mark = "*" if is_sel else " "
+                row_attr = curses.color_pair(1) | curses.A_BOLD if is_sel else curses.color_pair(4)
+                num = idx + 1   # 1-based position, survives list scrolling
+                stdscr.addnstr(main_row + 2 + i, PAD, f"{mark} {num:>2} {name}", left_w, row_attr)
+            # right column: description + wrapped command of the highlighted one
+            # (only when the list area actually has rows to draw into)
+            lines = []
+            if list_fit > 0:
+                entry = commands[selected]
+                desc = (entry.get("desc") or "").strip()
+                stdscr.addnstr(main_row + 2, right_col, desc or "(no description)",
+                               max(0, sw - right_col), curses.color_pair(4))
+                cmd = (entry.get("cmd") or "").strip()
+                wrapped = textwrap.fill(cmd, width=max(10, sw - right_col - 1)) if cmd else "(empty command)"
                 lines = wrapped.splitlines()
-                stdscr.addnstr(main_row, PAD, "Command:", sw,
-                               curses.color_pair(4) | curses.A_BOLD)
-                fit = available - 2   # leave the last line for the run info
-                for i, line in enumerate(lines[:max(0, fit)]):
-                    stdscr.addnstr(main_row + 1 + i, PAD + 1, line, sw, curses.color_pair(4))
-                if len(lines) > max(0, fit):
-                    stdscr.addnstr(main_row + fit, PAD + 1, "…", sw, curses.color_pair(4))
-                last_used = main_row + max(0, fit)
-                if last_run:
-                    info = f"last run: '{last_run['name']}' pid={last_run['pid']} log={last_run['log']}"
-                    stdscr.addnstr(last_used + 1, PAD + 1, info, sw, curses.color_pair(2))
-                    last_used += 1
-            else:
-                stdscr.addnstr(main_row, PAD, "(no commands — press n to add one)",
-                               sw, curses.color_pair(2))
-                last_used = main_row
-        # help overlay replaces the main area
+                for i, line in enumerate(lines[:max(0, list_fit - 1)]):
+                    stdscr.addnstr(main_row + 3 + i, right_col, line, max(0, sw - right_col), curses.color_pair(4))
+                # clip marker only when there's a spare row below the desc
+                if list_fit >= 2 and len(lines) > list_fit - 1:
+                    stdscr.addnstr(main_row + list_fit + 1, right_col, "…", max(0, sw - right_col), curses.color_pair(4))
+            # content height = header+spacer+names vs header+spacer+detail block
+            hdr = min(fit, 2)   # header row, plus the empty spacer row when it fits
+            list_h = hdr + min(len(names), list_fit)
+            detail_h = hdr + (1 + min(len(lines), max(0, list_fit - 1)) if list_fit > 0 else 0)
+            last_used = main_row + max(list_h, detail_h) - 1
+        elif not help_overlay:
+            stdscr.addnstr(main_row, PAD, "(no commands — press n to add one)",
+                           sw, curses.color_pair(2))
+            last_used = main_row
         if help_overlay:
-            for i, line in enumerate(HELP_TEXT[:available]):
+            for i, line in enumerate(HELP_TEXT[:max(0, fit)]):
                 stdscr.addnstr(main_row + i, PAD, line, sw, curses.color_pair(4))
-            last_used = main_row + min(len(HELP_TEXT), available) - 1
-        last_used = min(last_used, sh - 2)
+            last_used = main_row + max(0, min(len(HELP_TEXT), fit) - 1)
+        last_used = min(max(last_used, main_row), sh - 2)
 
-        # --- log (clamped: never overflows below the footer) ---
-        divider(last_used + 1)
-        log_top = last_used + 2
-        if log_top < sh - 1:
+        # --- log: anchored to the bottom of the screen ---
+        if log_h > 0:
+            log_top = sh - 1 - log_h      # "Log:" header; up to 2 lines below
+            # bottom line of the list area, pinned to the log section: it sits
+            # one row above the "Log:" header, not where the content ends
+            bottom_line = log_top - 1
+            if main_row < bottom_line < log_top:
+                divider(bottom_line)      # always, even with few rows of content
             stdscr.addnstr(log_top, PAD, "Log:", sw,
                            curses.color_pair(4) | curses.A_BOLD)
-            fit = (sh - 2) - (log_top + 1)
-            for i, line in enumerate(log_lines[:max(0, fit)]):
+            for i, line in enumerate(log_lines[:log_h - 1]):
                 stdscr.addnstr(log_top + 1 + i, PAD, line, sw, curses.color_pair(4))
 
         stdscr.addnstr(sh - 1, 0, ("─" * sw), sw)   # footer (never last row)
         border(stdscr, h, w)
-        note = f" theme: {theme} [t]   selected: {sel_name or '-'} [x] "
-        if menu_open:
-            note += " [menu open]"
-        stdscr.addnstr(sh - 1, max(0, w - len(note)), note, len(note),
+        note = f" theme: {theme} [t]   selected: {selected or '-'} "
+        if len(note) > w:
+            note = "…" + note[1 - w:]   # keep the right (most useful) part
+        stdscr.addnstr(sh - 1, max(0, w - len(note)), note, min(len(note), w),
                        curses.color_pair(4) | curses.A_BOLD)
 
         # frame complete: refresh diffs the virtual buffer against the
@@ -434,59 +651,30 @@ def main(stdscr):
         stdscr.refresh()
 
         # --- input -------------------------------------------------------
-        c = stdscr.getch()
-        if c == -1:        # timeout — just redraw
+        c = _main_getch(stdscr)
+        if c in (-1, "noop"):    # timeout / left-right arrow: no action, redraw
             continue
-        if c in (ord("q"), 27):
-            if menu_open or help_overlay:
-                menu_open = False
+        if c in (27, ord("q")):
+            if help_overlay:
                 help_overlay = False
             else:
                 break
             continue
-        if menu_open:
-            if c in (curses.KEY_UP,):
-                menu_cursor = max(0, menu_cursor - 1)
-            elif c in (curses.KEY_DOWN,):
-                names = list(commands)
-                if names:
-                    menu_cursor = min(len(names) - 1, menu_cursor + 1)
-            elif c == 10 or c == 13 or c == curses.KEY_ENTER:
-                # Enter: select the cursor command and close the menu
-                names = list(commands)
-                if names:
-                    selected = names[menu_cursor]
-                    save_commands(commands, selected)
-                    log = prepend_log(log, f"[command] selected '{selected}'")
-                menu_open = False
-            elif c == ord("n"):
-                name, entry = new_command(stdscr, sh, sw, commands)
-                if name:
-                    if not save_commands(commands, selected or name):
-                        log = prepend_log(log, f"[err] could not write '{name}' "
-                                               "to " + COMMANDS_FILE + " (not saved)")
-                    else:
-                        menu_cursor = min(len(commands) - 1, max(0, menu_cursor))
-                log = prepend_log(log, entry)
-            elif c == ord("d"):
-                names = list(commands)
-                if names and menu_cursor < len(names):
-                    target = names[menu_cursor]
-                    del commands[target]
-                    if selected == target:
-                        selected = names[menu_cursor] if menu_cursor < len(names) else \
-                            (names[-1] if names else "")
-                        save_commands(commands, selected)
-                        log = prepend_log(log, f"[command] deleted '{target}', "
-                                               f"selected '{selected or '(none)'}'")
-                    else:
-                        save_commands(commands, selected)
-                        log = prepend_log(log, f"[command] deleted '{target}'")
-                    menu_cursor = min(menu_cursor, max(0, len(commands) - 1))
+        if help_overlay:
+            if c in (ord("?"), ord("h")):
+                help_overlay = False
             continue
-        if c == 10 or c == 13 or c == curses.KEY_ENTER:
-            if sel_name:
-                rc, out = run_selected(sel_name)
+        if c in ("up", curses.KEY_UP):
+            if names and sel_idx > 0:
+                selected = names[sel_idx - 1]
+                save_commands(commands, selected)
+        elif c in ("down", curses.KEY_DOWN):
+            if names and sel_idx < len(names) - 1:
+                selected = names[sel_idx + 1]
+                save_commands(commands, selected)
+        elif c == 10 or c == 13 or c == curses.KEY_ENTER:
+            if selected in commands:
+                rc, out = run_selected(selected)
                 if rc == 0:
                     pid = logp = ""
                     for line in out.splitlines():
@@ -496,25 +684,63 @@ def main(stdscr):
                                 pid = m.group(1)
                         if line.startswith("log="):
                             logp = line[len("log="):].strip()
-                    last_run = {"name": sel_name, "pid": pid, "log": logp}
-                    log = prepend_log(log, f"[run] '{sel_name}' started pid={pid} log={logp}")
+                    log = prepend_log(log, f"[run] '{selected}' started pid={pid} log={logp}")
                 else:
-                    log = prepend_log(log, f"[err] run '{sel_name}' rc={rc}\n{out}")
-        elif c == ord("x"):
-            menu_open = True
-            menu_cursor = min(max(0, list(commands).index(selected)), max(0, len(commands) - 1)) \
-                if commands else 0
+                    log = prepend_log(log, f"[err] run '{selected}' rc={rc}\n{out}")
         elif c == ord("n"):
-            name, entry = new_command(stdscr, sh, sw, commands)
-            if name:
-                if not save_commands(commands, name):
-                    log = prepend_log(log, f"[err] could not write '{name}' "
-                                           "to " + COMMANDS_FILE + " (not saved)")
+            res = command_wizard(stdscr, sh, sw, commands)
+            if res:
+                name, desc, cmd = res
+                commands[name] = {"desc": desc, "cmd": cmd}
+                selected = name   # a fresh command becomes the highlighted one
+                if not save_commands(commands, selected):
+                    log = prepend_log(log, f"[err] could not write '{name}' to "
+                                           + COMMANDS_FILE + " (not saved)")
                 else:
-                    selected = name   # a fresh command becomes the selected one
-            log = prepend_log(log, entry)
+                    log = prepend_log(log, f"[command] saved '{name}'")
+        elif c == ord("e"):
+            if selected in commands:
+                old = selected
+                res = command_wizard(stdscr, sh, sw, commands, old_name=old,
+                                     desc=commands[old].get("desc", ""),
+                                     cmd=commands[old].get("cmd", ""))
+                if res:
+                    new_name, desc, cmd = res
+                    new_entry = {"desc": desc, "cmd": cmd}
+                    if new_name != old:
+                        rebuilt = {}
+                        for k, v in commands.items():
+                            if k == old:
+                                rebuilt[new_name] = new_entry
+                            else:
+                                rebuilt[k] = v
+                        commands.clear()
+                        commands.update(rebuilt)
+                    else:
+                        commands[new_name] = new_entry
+                    selected = new_name
+                    if not save_commands(commands, selected):
+                        log = prepend_log(log, f"[err] could not write '{selected}' to "
+                                               + COMMANDS_FILE + " (not saved)")
+                    else:
+                        if new_name != old:
+                            log = prepend_log(log, f"[command] renamed '{old}' -> '{new_name}'")
+                        else:
+                            log = prepend_log(log, f"[command] updated '{selected}'")
+        elif c == ord("d"):
+            if selected in commands:
+                target = selected
+                shown = target if len(target) <= 20 else target[:17] + "..."
+                if confirm(stdscr, sh, sw, f"Delete '{shown}'?"):
+                    del commands[target]
+                    names = list(commands)
+                    selected = names[sel_idx] if sel_idx < len(names) else \
+                        (names[-1] if names else "")
+                    save_commands(commands, selected)
+                    log = prepend_log(log, f"[command] deleted '{target}', "
+                                           f"selected '{selected or '(none)'}'")
         elif c in (ord("?"), ord("h")):
-            help_overlay = not help_overlay
+            help_overlay = True
         elif c == ord("t"):
             theme = apply_theme(stdscr, next_theme(theme))
             save_theme(theme)
