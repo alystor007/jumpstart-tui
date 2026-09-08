@@ -1,11 +1,15 @@
-import curses, os, sys, json, tempfile, importlib
+import curses
+import json
+import os
+import sys
+import tempfile
 
 TMP = tempfile.mkdtemp(prefix="js-tui-")
 os.environ["SUDO_HOME"] = TMP
 sys.path.insert(0, ".")
-os.chdir("/mnt/AI-work/jumpstart-tui")
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-import jumpstart_tui as jt
+import jumpstart_tui as jt  # noqa: E402  (import after curses mocking on purpose)
 curses.start_color = lambda: None
 curses.COLORS = 256
 curses.init_pair = lambda p, f, b: p
@@ -23,24 +27,31 @@ BSP, ENTER  = [127], [10]
 def K(*parts):
     out = []
     for p in parts:
-        if isinstance(p, str): out += [ord(c) for c in p]
-        elif isinstance(p, int): out.append(p)
-        else: out += list(p)
+        if isinstance(p, str):
+            out += [ord(c) for c in p]
+        elif isinstance(p, int):
+            out.append(p)
+        else:
+            out += list(p)
     return out
 
 class FakeScr:
     def __init__(self, h, w, keys=()):
         self.h, self.w = h, w
         self.grid = [[" "] * w for _ in range(h)]
-        self.keys = list(keys); self.ooobad = 0
+        self.keys = list(keys)
+        self.ooobad = 0
     def getmaxyx(self): return (self.h, self.w)
     def erase(self): self.grid = [[" "] * self.w for _ in range(self.h)]
     def _put(self, r, c, ch):
-        if 0 <= r < self.h and 0 <= c < self.w: self.grid[r][c] = ch
-        else: self.ooobad += 1
+        if 0 <= r < self.h and 0 <= c < self.w:
+            self.grid[r][c] = ch
+        else:
+            self.ooobad += 1
     def addch(self, r, c, ch, *a): self._put(r, c, ch[0])
     def addnstr(self, r, c, s, n, *a):
-        for i, ch in enumerate(s[:n]): self._put(r, c + i, ch)
+        for i, ch in enumerate(s[:n]):
+            self._put(r, c + i, ch)
     def refresh(self): pass
     def getch(self): return self.keys.pop(0) if self.keys else -1
     def timeout(self, t): pass
@@ -58,22 +69,36 @@ def edit(keys, initial=""):
     scr = FakeScr(24, 80, keys)
     return jt._edit_loop(scr, initial, lambda t, c: None)
 
-r = edit(K("abc", ENTER));                 check("edit: plain type", r == "abc", r)
-r = edit(K("ab", LEFT, RIGHT, RIGHT, LEFT, ENTER)); check("edit: arrows move only", r == "ab", r)
-r = edit(K("abc", LEFT, LEFT, "X", ENTER)); check("edit: insert middle", r == "aXbc", r)
-r = edit(K("ab", LEFT, BSP, ENTER));        check("edit: backspace", r == "b", r)
-r = edit(K("ab", LEFT, DEL, ENTER));        check("edit: delete", r == "a", r)
-r = edit(K("ab", LEFT, LEFT, BSP, ENTER));  check("edit: bsp at start no-op", r == "ab", r)
-r = edit(K("abc", END, "!", HOME, "#", ENTER)); check("edit: home/end", r == "#abc!", r)
+r = edit(K("abc", ENTER))
+check("edit: plain type", r == "abc", r)
+r = edit(K("ab", LEFT, RIGHT, RIGHT, LEFT, ENTER))
+check("edit: arrows move only", r == "ab", r)
+r = edit(K("abc", LEFT, LEFT, "X", ENTER))
+check("edit: insert middle", r == "aXbc", r)
+r = edit(K("ab", LEFT, BSP, ENTER))
+check("edit: backspace", r == "b", r)
+r = edit(K("ab", LEFT, DEL, ENTER))
+check("edit: delete", r == "a", r)
+r = edit(K("ab", LEFT, LEFT, BSP, ENTER))
+check("edit: bsp at start no-op", r == "ab", r)
+r = edit(K("abc", END, "!", HOME, "#", ENTER))
+check("edit: home/end", r == "#abc!", r)
 long = "echo " + "x" * 300 + " | tee /var/log/x"
-r = edit(K(long, ENTER)); check("edit: 300+ char integrity", r == long, r[:40])
-r = edit(K("abc", [ESC])); check("edit: esc cancels", r is None, r)
-r = edit(K("a", -1, "b", ENTER)); check("edit: timeout continues", r == "ab", r)
+r = edit(K(long, ENTER))
+check("edit: 300+ char integrity", r == long, r[:40])
+r = edit(K("abc", [ESC]))
+check("edit: esc cancels", r is None, r)
+r = edit(K("a", -1, "b", ENTER))
+check("edit: timeout continues", r == "ab", r)
 # keypad mode (default under curses.wrapper): arrows arrive as KEY_* constants
-r = edit(K("abc", curses.KEY_LEFT, curses.KEY_LEFT, "X", ENTER)); check("edit: keypad left", r == "aXbc", r)
-r = edit(K("abc", curses.KEY_RIGHT, "X", ENTER)); check("edit: keypad right", r == "abcX", r)
-r = edit(K("abc", curses.KEY_HOME, "Z", curses.KEY_END, "!", ENTER)); check("edit: keypad home/end", r == "Zabc!", r)
-r = edit(K("a", [ESC, 91, -1], "b", ENTER)); check("edit: split esc ignored", r == "ab", r)
+r = edit(K("abc", curses.KEY_LEFT, curses.KEY_LEFT, "X", ENTER))
+check("edit: keypad left", r == "aXbc", r)
+r = edit(K("abc", curses.KEY_RIGHT, "X", ENTER))
+check("edit: keypad right", r == "abcX", r)
+r = edit(K("abc", curses.KEY_HOME, "Z", curses.KEY_END, "!", ENTER))
+check("edit: keypad home/end", r == "Zabc!", r)
+r = edit(K("a", [ESC, 91, -1], "b", ENTER))
+check("edit: split esc ignored", r == "ab", r)
 
 # ---------- confirm ----------
 def confirm(keys):
@@ -238,4 +263,5 @@ except Exception as e:
 
 print(f"\n{len(passed)}/{len(passed) + len(failed)} passed")
 if failed:
-    print("FAILED:", failed); sys.exit(1)
+    print("FAILED:", failed)
+sys.exit(1)

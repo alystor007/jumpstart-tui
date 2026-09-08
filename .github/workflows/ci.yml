@@ -23,3 +23,6 @@ jobs:
 
       - name: Lint
         run: ruff check .
+
+      - name: Run test suite
+        run: python test_jumpstart.py
