@@ -10,6 +10,10 @@ Built with the same TUI architecture as
 [nvidia-tui-overclocker](https://github.com/alystor007/Nvidia-TUI-overclocker):
 flicker-free diff rendering, 8 switchable themes, session action log.
 
+## Screenshot
+
+![Jumpstart TUI](jumpstart-tui.png)
+
 ## Files
 
 | File | Purpose |
