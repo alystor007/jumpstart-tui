@@ -264,4 +264,4 @@ except Exception as e:
 print(f"\n{len(passed)}/{len(passed) + len(failed)} passed")
 if failed:
     print("FAILED:", failed)
-sys.exit(1)
+sys.exit(1 if failed else 0)
