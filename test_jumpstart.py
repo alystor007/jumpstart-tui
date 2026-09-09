@@ -246,6 +246,39 @@ check("main: delete logged", "[command] deleted 'a'" in grid2, grid2[:200])
 check("main: highlight rendered",
       any(r[4:6] == "* " for r in ["".join(x) for x in scr2.grid]))
 
+# ---------- duplicate (D) ----------
+check("dup: free name", jt._dup_name("a", {"a": {}}) == "a copy")
+check("dup: bump past taken", jt._dup_name("a", {"a": {}, "a copy": {}, "a copy 2": {}}) == "a copy 3")
+check("dup: different base", jt._dup_name("b", {"a": {}, "b": {}}) == "b copy")
+
+json.dump({"selected": "a",
+           "a": {"desc": "first desc", "cmd": "echo a"},
+           "b": {"desc": "second desc", "cmd": "echo b"}}, open(jt.COMMANDS_FILE, "w"))
+scrD = FakeScr(24, 80, K("c", ENTER, ENTER, ENTER, "q"))
+jt.main(scrD)
+dataD = json.load(open(jt.COMMANDS_FILE))
+namesD = [k for k in dataD if k != "selected"]
+check("main: duplicate created", set(namesD) == {"a", "b", "a copy"}, namesD)
+check("main: duplicate copies fields",
+      dataD["a copy"]["desc"] == "first desc" and dataD["a copy"]["cmd"] == "echo a",
+      dataD.get("a copy"))
+check("main: duplicate selected", dataD.get("selected") == "a copy", dataD.get("selected"))
+check("main: duplicate no oob", scrD.ooobad == 0, scrD.ooobad)
+gridD = "\n".join("".join(r) for r in scrD.grid)
+check("main: duplicate logged", "[command] duplicated 'a' as 'a copy'" in gridD, gridD[-200:])
+
+# name already taken -> bumped
+json.dump({"selected": "a",
+           "a": {"desc": "", "cmd": "echo a"},
+           "a copy": {"desc": "", "cmd": "x"},
+           "b": {"desc": "", "cmd": "echo b"}}, open(jt.COMMANDS_FILE, "w"))
+scrD2 = FakeScr(24, 80, K("c", ENTER, ENTER, ENTER, "q"))
+jt.main(scrD2)
+dataD2 = json.load(open(jt.COMMANDS_FILE))
+check("main: duplicate name bumped",
+      set(k for k in dataD2 if k != "selected") == {"a", "a copy", "b", "a copy 2"},
+      [k for k in dataD2 if k != "selected"])
+
 # ---------- narrow screen smoke ----------
 json.dump({"selected": "a", "a": {"desc": "d", "cmd": "echo a"},
            "b": {"desc": "second", "cmd": "echo b"}}, open(jt.COMMANDS_FILE, "w"))

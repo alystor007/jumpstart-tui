@@ -230,7 +230,7 @@ def _prompt_key(stdscr) -> str | tuple[str, str] | None:
             return ("char", chr(c))
         return None
     # Escape: either a bare Esc (cancel) or the start of a key sequence.
-    stdscr.timeout(30)
+    stdscr.timeout(10)
     c2 = stdscr.getch()
     stdscr.timeout(-1)
     if c2 not in (ord("["), ord("O")):
@@ -268,7 +268,7 @@ def _main_getch(stdscr) -> int | str:
     c = stdscr.getch()
     if c != 27:
         return c
-    stdscr.timeout(30)
+    stdscr.timeout(10)
     c2 = stdscr.getch()
     stdscr.timeout(100)
     if c2 not in (ord("["), ord("O")):
@@ -326,6 +326,19 @@ def _edit_loop(stdscr, initial: str, render) -> str | None:
             render(text, cur)
     finally:
         stdscr.timeout(100)
+
+
+def _dup_name(base: str, commands: dict) -> str:
+    """First free name for a duplicate of `base`: '<base> copy', bumped to
+    ' copy 2', ' copy 3', ... until the name is free."""
+    if base + " copy" not in commands:
+        return base + " copy"
+    n = 2
+    while True:
+        cand = f"{base} copy {n}"
+        if cand not in commands:
+            return cand
+        n += 1
 
 
 def _name_error(name: str, commands: dict, old_name: str) -> str:
@@ -478,6 +491,7 @@ HELP_TEXT = [
     "  n ...... define + save a new command",
     "  e ...... edit the highlighted command",
     "  d ...... delete the highlighted command (y/N)",
+    "  c ...... clone the highlighted command",
     "  t ...... cycle color theme",
     "  q / Esc . quit",
     "  fields  . arrows move, Bksp/Del edit, Enter next, Esc cancel",
@@ -491,6 +505,10 @@ HELP_TEXT = [
 def main(stdscr):
     curses.curs_set(0)
     curses.start_color()
+    # ncurses waits up to this many ms to decide a lone 0x1B is a
+    # bare Esc vs the start of an arrow/fn-key sequence; cap it so
+    # Esc is not sluggish (the app's own 10ms peek adds on top).
+    curses.set_escdelay(25)
     theme = apply_theme(stdscr, load_theme())
 
     commands, selected = load_state()
@@ -505,7 +523,7 @@ def main(stdscr):
     # screen and pushes only the changed cells (steady state: none).
     while True:
         hint = ("[↑↓] move  [Enter] run  [n] new  [e] edit  [d] delete  "
-                "[t] theme  [q] quit  [?] help")
+                "[c] clone  [t] theme  [q] quit  [?] help")
         log_lines = (log or "(no action yet)").splitlines()
 
         # --- render ------------------------------------------------------
@@ -727,6 +745,23 @@ def main(stdscr):
                             log = prepend_log(log, f"[command] renamed '{old}' -> '{new_name}'")
                         else:
                             log = prepend_log(log, f"[command] updated '{selected}'")
+        elif c == ord("c"):
+            if selected in commands:
+                src_name = selected
+                src = commands[src_name]
+                dup = _dup_name(src_name, commands)
+                res = command_wizard(stdscr, sh, sw, commands, old_name=dup,
+                                     desc=src.get("desc", ""),
+                                     cmd=src.get("cmd", ""))
+                if res:
+                    name, desc, cmd = res
+                    commands[name] = {"desc": desc, "cmd": cmd}
+                    selected = name
+                    if not save_commands(commands, selected):
+                        log = prepend_log(log, f"[err] could not write '{selected}' to "
+                                               + COMMANDS_FILE + " (not saved)")
+                    else:
+                        log = prepend_log(log, f"[command] duplicated '{src_name}' as '{name}'")
         elif c == ord("d"):
             if selected in commands:
                 target = selected
