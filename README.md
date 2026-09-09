@@ -53,9 +53,12 @@ python3 run_command.py <name>       # start a saved command detached
 | `d` | Delete the cursor command (menu open) |
 | `t` | Cycle color theme |
 | `?` | Help overlay |
+| `Ctrl+V` | Toggle in-field selection (wizard); `←`/`→` extend, typing replaces, `BSP` removes |
 | `q` / `Esc` | Quit (Esc also closes the menu/help) |
 
 `Esc` + `Enter` cancels a prompt.
+In the wizard, `Ctrl+V` selects within the current field: extend with `←`/`→`,
+typing or `BSP` replaces/deletes the selection, any other key collapses it.
 
 ## Data
 

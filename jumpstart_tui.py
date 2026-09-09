@@ -203,8 +203,8 @@ def prepend_log(log: str, entry: str) -> str:
 
 def _prompt_key(stdscr) -> str | tuple[str, str] | None:
     """Read one key and resolve it into a line-editor action: 'esc',
-    'enter', 'backspace', 'delete', 'left', 'right', 'home', 'end', or
-    ('char', ch). Arrow keys arrive as keypad constants (KEY_LEFT, ...) or
+    'enter', 'backspace', 'delete', 'left', 'right', 'home', 'end', 'sel'
+    (Ctrl+V toggles selection), or ('char', ch). Arrow keys arrive as keypad constants (KEY_LEFT, ...) or
     as raw ESC [ C/D sequences; both are decoded here so they can never
     corrupt the text buffer."""
     c = stdscr.getch()
@@ -214,6 +214,8 @@ def _prompt_key(stdscr) -> str | tuple[str, str] | None:
         return "enter"
     if c in (8, 127, curses.KEY_BACKSPACE, curses.KEY_DC):
         return "backspace"
+    if c == 22:  # Ctrl+V: toggle in-field selection
+        return "sel"
     # Keypad mode (on by default under curses.wrapper) delivers arrow keys
     # as constants, not escape sequences — decode them before the "plain
     # key" check so they move the cursor instead of being dropped.
@@ -286,31 +288,57 @@ def _main_getch(stdscr) -> int | str:
 
 
 def _edit_loop(stdscr, initial: str, render) -> str | None:
-    """Shared line-editor loop. `render(text, cur)` draws the full current
-    state (the wizard redraws its whole box; it owns the layout).
-    Returns the stripped text on Enter, None on Esc. The buffer is
-    unbounded — render() decides which slice is visible. Arrows move the
-    cursor only; Backspace/Delete change the text."""
+    """Shared line-editor loop. `render(text, cur, sel)` draws the current
+    state (the wizard redraws its whole box; it owns the layout); `sel` is
+    a (start, end) selection range or None. Returns the stripped text on
+    Enter, None on Esc. The buffer is unbounded — render() decides which
+    slice is visible. Arrows move the cursor (extending the selection in
+    select mode); Ctrl+V toggles select mode; Backspace/Delete and typed
+    characters clear an active selection. Selection is per-field and never
+    changes the returned text — it only shapes how edits transform it."""
     text = initial
     cur = len(initial)
-    render(text, cur)
+    anchor = None  # None = not in select mode; int = selection start
+
+    def sel_range():
+        if anchor is None or anchor == cur:
+            return None
+        return (min(anchor, cur), max(anchor, cur))
+
+    render(text, cur, sel_range())
     try:
         stdscr.timeout(-1)
         while True:
             act = _prompt_key(stdscr)
             if act == "timeout":
-                continue
-            if act == "esc":
+                pass
+            elif act == "esc":
                 return None
-            if act == "enter":
+            elif act == "enter":
                 return text.strip()
-            if act == "backspace":
-                if cur > 0:
-                    text = text[:cur - 1] + text[cur:]
-                    cur -= 1
+            elif act == "sel":
+                anchor = None if anchor is not None else cur
+            elif act == "backspace":
+                if anchor is not None and anchor != cur:
+                    lo, hi = sel_range()
+                    text = text[:lo] + text[hi:]
+                    cur = lo
+                    anchor = None
+                else:
+                    anchor = None
+                    if cur > 0:
+                        text = text[:cur - 1] + text[cur:]
+                        cur -= 1
             elif act == "delete":
-                if cur < len(text):
-                    text = text[:cur] + text[cur + 1:]
+                if anchor is not None and anchor != cur:
+                    lo, hi = sel_range()
+                    text = text[:lo] + text[hi:]
+                    cur = lo
+                    anchor = None
+                else:
+                    anchor = None
+                    if cur < len(text):
+                        text = text[:cur] + text[cur + 1:]
             elif act == "left":
                 cur = max(0, cur - 1)
             elif act == "right":
@@ -321,9 +349,16 @@ def _edit_loop(stdscr, initial: str, render) -> str | None:
                 cur = len(text)
             elif act is not None:   # ("char", ch)
                 ch = act[1]
-                text = text[:cur] + ch + text[cur:]
-                cur += len(ch)
-            render(text, cur)
+                if anchor is not None and anchor != cur:
+                    lo, hi = sel_range()
+                    text = text[:lo] + ch + text[hi:]
+                    cur = lo + len(ch)
+                    anchor = None
+                else:
+                    anchor = None
+                    text = text[:cur] + ch + text[cur:]
+                    cur += len(ch)
+            render(text, cur, sel_range())
     finally:
         stdscr.timeout(100)
 
@@ -353,7 +388,7 @@ def _name_error(name: str, commands: dict, old_name: str) -> str:
 
 
 def draw_wizard_box(stdscr, sh, sw, top, left, bw, bh, title, values, active_i,
-                    error, active_text, active_cur):
+                    error, active_text, active_cur, active_sel=None):
     """Draw the wizard box: border, title, the three fields (the active one
     with the live editor text + reverse-video cursor), hint, error line."""
     labels = ("Command name", "Description", "Shell command")
@@ -382,17 +417,17 @@ def draw_wizard_box(stdscr, sh, sw, top, left, bw, bh, title, values, active_i,
         tcol = left + 2 + len(label) + 1
         twidth = max(1, bw - 4 - len(label) - 1)
         if is_active:
-            # visible slice around the cursor (the field scrolls, not the box)
+            # visible slice around the cursor (the field scrolls, not the box);
+            # selected range and the cursor cell are drawn reverse-video
             start = max(0, min(active_cur - 1, len(active_text) - twidth)) if len(active_text) > twidth else 0
-            pre = active_text[start:active_cur]
-            post = active_text[active_cur + 1: start + twidth]
-            stdscr.addnstr(row, tcol, pre, twidth)
-            ch = active_text[active_cur] if active_cur < len(active_text) else " "
-            stdscr.addch(row, tcol + len(pre), ch, curses.A_REVERSE)
-            stdscr.addnstr(row, tcol + len(pre) + 1, post, twidth - len(pre) - 1)
+            for p in range(start, start + twidth):
+                ch = active_text[p] if p < len(active_text) else " "
+                in_sel = active_sel is not None and active_sel[0] <= p < active_sel[1]
+                cell_attr = curses.A_REVERSE if (p == active_cur or in_sel) else 0
+                stdscr.addch(row, tcol + (p - start), ch, cell_attr)
         else:
             stdscr.addnstr(row, tcol, text, twidth)
-    stdscr.addnstr(top + 5, left + 2, "[Enter] next field    [Esc] cancel", bw - 4, attr)
+    stdscr.addnstr(top + 5, left + 2, "[^v] select  [Enter] next  [Esc] cancel", bw - 4, attr)
     if error:
         stdscr.addnstr(top + bh - 1, left + 1, error, bw - 2, curses.color_pair(2))
 
@@ -412,9 +447,9 @@ def command_wizard(stdscr, sh, sw, commands, old_name="", desc="", cmd="") -> tu
     while i < len(keys):
         key = keys[i]
 
-        def render(text, cur, key=key, i=i):
+        def render(text, cur, sel, key=key, i=i):
             draw_wizard_box(stdscr, sh, sw, top, left, bw, bh, title, values, i,
-                            error, text, cur)
+                            error, text, cur, sel)
 
         res = _edit_loop(stdscr, values[key], render)
         if res is None:

@@ -67,7 +67,7 @@ def check(name, cond, extra=""):
 # ---------- _edit_loop ----------
 def edit(keys, initial=""):
     scr = FakeScr(24, 80, keys)
-    return jt._edit_loop(scr, initial, lambda t, c: None)
+    return jt._edit_loop(scr, initial, lambda t, c, s: None)
 
 r = edit(K("abc", ENTER))
 check("edit: plain type", r == "abc", r)
@@ -99,6 +99,29 @@ r = edit(K("abc", curses.KEY_HOME, "Z", curses.KEY_END, "!", ENTER))
 check("edit: keypad home/end", r == "Zabc!", r)
 r = edit(K("a", [ESC, 91, -1], "b", ENTER))
 check("edit: split esc ignored", r == "ab", r)
+
+# ---------- selection (Ctrl+V) ----------
+SEL = 22  # Ctrl+V
+r = edit(K("hello", HOME, SEL, LEFT, LEFT, ENTER))
+check("sel: no-op until extended", r == "hello", r)
+r = edit(K("hello", HOME, SEL, RIGHT, RIGHT, "Z", ENTER))
+check("sel: extend then type replaces", r == "Zllo", r)
+r = edit(K("hello", HOME, SEL, RIGHT, RIGHT, BSP, ENTER))
+check("sel: backspace removes selection", r == "llo", r)
+r = edit(K("hello", HOME, SEL, RIGHT, RIGHT, "X", ENTER))
+check("sel: replace keeps following", r == "Xllo", r)
+r = edit(K("hello", HOME, SEL, RIGHT, RIGHT, LEFT, ENTER))
+check("sel: arrow collapses, no delete", r == "hello", r)
+r = edit(K("hello", HOME, SEL, RIGHT, RIGHT, RIGHT, ENTER))
+check("sel: extend past end clamps", r == "hello", r)
+r = edit(K("hello", SEL, RIGHT, RIGHT, RIGHT, ENTER))
+check("sel: extend from cursor", r == "hello", r)
+r = edit(K("hello", SEL, LEFT, LEFT, "Q", ENTER))
+check("sel: extend leftwards", r == "helQ", r)
+r = edit(K("hello", HOME, SEL, RIGHT, RIGHT, SEL, RIGHT, ENTER))
+check("sel: second toggle clears selection", r == "hello", r)
+r = edit(K("hello", HOME, SEL, RIGHT, RIGHT, ENTER))
+check("sel: enter returns full text (selection is visual)", r == "hello", r)
 
 # ---------- confirm ----------
 def confirm(keys):
