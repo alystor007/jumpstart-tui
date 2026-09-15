@@ -17,6 +17,7 @@ Keys:
   n       -> Define + save a new command (central dialog)
   e       -> Edit the highlighted command
   d       -> Delete the highlighted command (y/N confirm)
+  l       -> Copy the newest log file path to the clipboard
   t       -> Cycle theme (saved between runs)
   ?       -> Help overlay
   q / Esc -> Quit
@@ -26,6 +27,7 @@ import curses
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -49,6 +51,8 @@ RUN_SCRIPT = os.path.join(_HERE, "run_command.py")
 _HOME = os.environ.get("SUDO_HOME") or os.path.expanduser("~")
 CONFIG_DIR = os.path.join(_HOME, ".config", "jumpstart")
 COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
+# Log dir is created by run_command.py; keep the two in lockstep (same SUDO_HOME rule).
+LOG_DIR = os.path.join(_HOME, ".local", "state", "jumpstart", "logs")
 
 
 def load_state() -> tuple[dict, str]:
@@ -195,6 +199,54 @@ def run_selected(name: str) -> tuple[int, str]:
 def prepend_log(log: str, entry: str) -> str:
     """Prepend an entry, keeping one line per entry."""
     return entry if not log else entry + "\n" + log
+
+
+def _latest_log_path() -> str | None:
+    """Path of the newest log file in LOG_DIR (by mtime), or None if there are
+    none. Reads the directory (not memory) so it still works after a restart."""
+    try:
+        entries = [os.path.join(LOG_DIR, f) for f in os.listdir(LOG_DIR)]
+    except OSError:
+        return None
+    logs = [p for p in entries if p.endswith(".log")]
+    if not logs:
+        return None
+    return max(logs, key=lambda p: os.path.getmtime(p))
+
+
+def _copy_to_clipboard(text: str) -> tuple[bool, str]:
+    """Put `text` on the clipboard.
+
+    Tries OSC 52 first: no local tool needed, instant, works over SSH — the
+    terminal writes the clipboard itself. Only if that write fails does it
+    fall back to a local tool (wl-copy / xclip / xsel), each probed with
+    shutil.which and given a short timeout so a failing tool can't stall the
+    key. Returns (ok, method_or_reason)."""
+    try:
+        import base64
+        payload = base64.b64encode(text.encode()).decode("ascii")
+        os.write(1, f"\033]52;c;{payload}\033\\".encode("ascii"))
+        return True, "OSC 52"
+    except Exception as e:
+        osc_err = f"{type(e).__name__}: {e}"
+    tools = []
+    if os.environ.get("WAYLAND_DISPLAY"):
+        tools.append(("wl-copy", ["wl-copy"]))
+    if os.environ.get("DISPLAY"):
+        tools += [("xclip", ["xclip", "-selection", "clipboard"]),
+                  ("xsel", ["xsel", "--clipboard", "--input"])]
+    for name, cmd in tools:
+        if not shutil.which(name):
+            continue
+        try:
+            r = subprocess.run(cmd, input=text.encode(),
+                               capture_output=True, timeout=0.75)
+            if r.returncode == 0:
+                return True, name
+        except (OSError, subprocess.SubprocessError):
+            pass
+    tried = ", ".join(name for name, _ in tools) or "none"
+    return False, f"OSC 52 failed ({osc_err}); no local tool worked ({tried})"
 
 
 # ============================================================
@@ -527,6 +579,7 @@ HELP_TEXT = [
     "  e ...... edit the highlighted command",
     "  d ...... delete the highlighted command (y/N)",
     "  c ...... clone the highlighted command",
+    "  l ...... copy the newest log file path to the clipboard",
     "  t ...... cycle color theme",
     "  q / Esc . quit",
     "  fields  . arrows move, Bksp/Del edit, Enter next, Esc cancel",
@@ -558,7 +611,7 @@ def main(stdscr):
     # screen and pushes only the changed cells (steady state: none).
     while True:
         hint = ("[↑↓] move  [Enter] run  [n] new  [e] edit  [d] delete  "
-                "[c] clone  [t] theme  [q] quit  [?] help")
+                "[c] clone  [l] copy log  [t] theme  [q] quit  [?] help")
         log_lines = (log or "(no action yet)").splitlines()
 
         # --- render ------------------------------------------------------
@@ -688,7 +741,10 @@ def main(stdscr):
             stdscr.addnstr(log_top, PAD, "Log:", sw,
                            curses.color_pair(4) | curses.A_BOLD)
             for i, line in enumerate(log_lines[:log_h - 1]):
-                stdscr.addnstr(log_top + 1 + i, PAD, line, sw, curses.color_pair(4))
+                # clip to the safe width from PAD (a full log path is long) so
+                # the line never reaches the right border
+                stdscr.addnstr(log_top + 1 + i, PAD, line, sw - PAD,
+                               curses.color_pair(4))
 
         stdscr.addnstr(sh - 1, 0, ("─" * sw), sw)   # footer (never last row)
         border(stdscr, h, w)
@@ -797,6 +853,16 @@ def main(stdscr):
                                                + COMMANDS_FILE + " (not saved)")
                     else:
                         log = prepend_log(log, f"[command] duplicated '{src_name}' as '{name}'")
+        elif c == ord("l"):
+            path = _latest_log_path()
+            if not path:
+                log = prepend_log(log, f"[err] no log files in {LOG_DIR}")
+            else:
+                ok, how = _copy_to_clipboard(path)
+                if ok:
+                    log = prepend_log(log, f"[copy] {how}: {path}")
+                else:
+                    log = prepend_log(log, f"[err] copy failed ({how})")
         elif c == ord("d"):
             if selected in commands:
                 target = selected

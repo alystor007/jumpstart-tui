@@ -1,6 +1,8 @@
 import curses
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -16,6 +18,10 @@ curses.init_pair = lambda p, f, b: p
 curses.color_pair = lambda p: 0
 curses.use_default_colors = lambda: None
 jt.run_selected = lambda name: (0, "started\npid=42\nlog=/tmp/fake.log")
+# clipboard stub: records every path asked to be copied (assert the exact arg)
+CLIP = []
+_real_copy = jt._copy_to_clipboard   # keep the real fn for the OSC 52 test
+jt._copy_to_clipboard = lambda t: (CLIP.append(t), (True, "xclip"))[1]
 curses.curs_set = lambda n: None
 
 ESC = 27
@@ -301,6 +307,88 @@ dataD2 = json.load(open(jt.COMMANDS_FILE))
 check("main: duplicate name bumped",
       set(k for k in dataD2 if k != "selected") == {"a", "a copy", "b", "a copy 2"},
       [k for k in dataD2 if k != "selected"])
+
+# ---------- copy log path (l) ----------
+# _latest_log_path picks the newest .log by mtime (None when dir absent/empty)
+os.makedirs(jt.LOG_DIR, exist_ok=True)
+old_log = os.path.join(jt.LOG_DIR, "a-20260101-000000.log")
+new_log = os.path.join(jt.LOG_DIR, "b-20260102-000000.log")
+for p in (old_log, new_log):
+    with open(p, "w") as f:
+        f.write("x")
+os.utime(old_log, (1000, 1000))
+os.utime(new_log, (2000, 2000))
+check("copy: newest log by mtime", jt._latest_log_path() == new_log, jt._latest_log_path())
+os.remove(old_log)
+os.remove(new_log)
+check("copy: empty dir -> None", jt._latest_log_path() is None)
+os.rmdir(jt.LOG_DIR)
+check("copy: missing dir -> None", jt._latest_log_path() is None)
+
+# main(): 'l' with a log present -> path copied + feedback line; no oob
+# (OSC 52 first: the real _copy_to_clipboard, no clipboard tool, fd 1 captured)
+_env = {k: os.environ.pop(k) for k in ("DISPLAY", "WAYLAND_DISPLAY") if k in os.environ}
+try:
+    fd1 = os.dup(1)
+    cap = tempfile.NamedTemporaryFile(delete=False)
+    os.dup2(cap.fileno(), 1)
+    try:
+        ok, how = _real_copy("/tmp/some-log.log")
+    finally:
+        os.dup2(fd1, 1)
+        os.close(fd1)
+        cap.close()
+    import base64
+    out = open(cap.name, "rb").read().decode("ascii")
+    exp = "\033]52;c;" + base64.b64encode(b"/tmp/some-log.log").decode("ascii") + "\033\\"
+    check("osc52: success + exact sequence", ok and how == "OSC 52" and out == exp, out)
+finally:
+    os.environ.update(_env)
+
+# fallback: OSC 52 write fails -> local tool used (os.write, shutil.which,
+# subprocess.run all stubbed)
+os.environ["DISPLAY"] = "fake"
+_sh_which = shutil.which
+_sp_run = subprocess.run
+_os_write = os.write
+shutil.which = lambda name: "/bin/" + name   # pretend the tools are installed
+subprocess.run = lambda cmd, **k: type("R", (), {"returncode": 0})()
+os.write = lambda fd, b: (_ for _ in ()).throw(OSError(5, "write refused"))
+try:
+    ok, how = _real_copy("/tmp/some-log.log")
+    check("copy: OSC52 fail falls back to xclip", ok and how == "xclip", (ok, how))
+finally:
+    os.write = _os_write
+    shutil.which = _sh_which
+    subprocess.run = _sp_run
+    del os.environ["DISPLAY"]
+
+# main(): 'l' with a log present -> path copied + feedback line; no oob
+os.makedirs(jt.LOG_DIR, exist_ok=True)
+with open(new_log, "w") as f:
+    f.write("x")
+os.utime(new_log, (2000, 2000))
+json.dump({"selected": "a", "a": {"desc": "d", "cmd": "echo a"}},
+          open(jt.COMMANDS_FILE, "w"))
+CLIP.clear()
+scrC = FakeScr(24, 80, K("l", "q"))
+jt.main(scrC)
+check("copy: path sent to clipboard", CLIP == [new_log], CLIP)
+gridC = "\n".join("".join(r) for r in scrC.grid)
+# the full path is longer than one screen row, so only the prefix survives in
+# the grid; the clipboard (CLIP) carries the full path (asserted above)
+check("copy: feedback logged", "[copy] xclip:" in gridC, gridC[-200:])
+check("copy: no oob", scrC.ooobad == 0, scrC.ooobad)
+os.remove(new_log)
+os.rmdir(jt.LOG_DIR)
+# main(): 'l' with no logs -> error line
+json.dump({"selected": "a", "a": {"desc": "d", "cmd": "echo a"}},
+          open(jt.COMMANDS_FILE, "w"))
+scrC2 = FakeScr(24, 80, K("l", "q"))
+jt.main(scrC2)
+gridC2 = "\n".join("".join(r) for r in scrC2.grid)
+check("copy: no-logs error", f"[err] no log files in {jt.LOG_DIR}" in gridC2, gridC2[-300:])
+check("copy: no-logs no oob", scrC2.ooobad == 0, scrC2.ooobad)
 
 # ---------- narrow screen smoke ----------
 json.dump({"selected": "a", "a": {"desc": "d", "cmd": "echo a"},
