@@ -97,18 +97,21 @@ def save_commands(commands: dict, selected: str) -> bool:
 
 # "btn" = accent for the option buttons ([x], [n], ...) in the hint
 # line, so the keys read as pressable buttons. Pair 6.
+# "field" = background tone for editable text boxes (a step lighter than
+# the theme's bg). Pair 7.
 THEMES = {
-    "dark":      {"fg": [curses.COLOR_GREEN, curses.COLOR_RED, curses.COLOR_YELLOW, curses.COLOR_WHITE], "bg": curses.COLOR_BLACK, "btn": curses.COLOR_YELLOW},
-    "light":     {"fg": [curses.COLOR_BLUE,  curses.COLOR_RED, curses.COLOR_MAGENTA, curses.COLOR_BLACK], "bg": curses.COLOR_WHITE, "btn": curses.COLOR_BLUE},
-    "matrix":    {"fg": [curses.COLOR_GREEN, curses.COLOR_GREEN, curses.COLOR_GREEN, curses.COLOR_GREEN], "bg": curses.COLOR_BLACK, "btn": curses.COLOR_GREEN},
-    "solarized": {"fg": [64, 166, 172, 252],  "bg": 235, "btn": 178},
-    "gruvbox":   {"fg": [142, 167, 215, 223], "bg": 235, "btn": 216},
-    "nord":      {"fg": [108, 173, 179, 252], "bg": 235, "btn": 117},
-    "dracula":   {"fg": [46, 203, 190, 252],  "bg": 235, "btn": 226},
+    "dark":      {"fg": [curses.COLOR_GREEN, curses.COLOR_RED, curses.COLOR_YELLOW, curses.COLOR_WHITE], "bg": curses.COLOR_BLACK, "btn": curses.COLOR_YELLOW, "field": curses.COLOR_BLUE},
+    "light":     {"fg": [curses.COLOR_BLUE,  curses.COLOR_RED, curses.COLOR_MAGENTA, curses.COLOR_BLACK], "bg": curses.COLOR_WHITE, "btn": curses.COLOR_BLUE, "field": curses.COLOR_CYAN},
+    "matrix":    {"fg": [curses.COLOR_GREEN, curses.COLOR_GREEN, curses.COLOR_GREEN, curses.COLOR_GREEN], "bg": curses.COLOR_BLACK, "btn": curses.COLOR_GREEN, "field": curses.COLOR_BLUE},
+    "solarized": {"fg": [64, 166, 172, 252],  "bg": 235, "btn": 178, "field": 237},
+    "gruvbox":   {"fg": [142, 167, 215, 223], "bg": 235, "btn": 216, "field": 237},
+    "nord":      {"fg": [108, 173, 179, 252], "bg": 235, "btn": 117, "field": 237},
+    "dracula":   {"fg": [46, 203, 190, 252],  "bg": 235, "btn": 226, "field": 237},
     # omarchy.org palette (Tokyo Night base + Omarchy green accent).
     # "transparent": -1 = the terminal's actual default fg/bg (needs
     # use_default_colors()), no bkgd fill — terminal shows through.
-    "transparent": {"fg": [114, 124, 146, 111], "bg": -1, "btn": 118, "transparent": True},
+    # Field boxes still get a subtle gray fill so they read as inputs.
+    "transparent": {"fg": [114, 124, 146, 111], "bg": -1, "btn": 118, "field": 236, "transparent": True},
 }
 
 THEME_FILE = os.path.join(CONFIG_DIR, "theme")
@@ -123,7 +126,7 @@ def apply_theme(stdscr, name: str) -> str:
     """Init color pairs for `name` and set the window background;
     returns the theme actually applied."""
     t = THEMES.get(name, THEMES["dark"])
-    if max([*t["fg"], t["bg"], t["btn"]]) >= curses.COLORS:
+    if max([*t["fg"], t["bg"], t["btn"], t["field"]]) >= curses.COLORS:
         t, name = THEMES["dark"], "dark"
     if t.get("transparent"):
         # -1 only means "terminal default" once this flag is set.
@@ -135,6 +138,7 @@ def apply_theme(stdscr, name: str) -> str:
         # and we skip bkgd() so its background shows through.
         curses.init_pair(5, -1, -1)
         curses.init_pair(6, t["btn"], -1)
+        curses.init_pair(7, t["fg"][3], t["field"])
         return name
     # Pair 5 = window background: whole-screen bg follows the theme.
     # (Pair 0 is the terminal default and cannot be re-init'd on
@@ -142,6 +146,9 @@ def apply_theme(stdscr, name: str) -> str:
     curses.init_pair(5, t["fg"][3], t["bg"])
     # Pair 6 = option-button accent (the [keys] in the hint line).
     curses.init_pair(6, t["btn"], t["bg"])
+    # Pair 7 = editable-field tone: body fg on a lighter-than-bg fill,
+    # so the wizard's text fields read as boxes.
+    curses.init_pair(7, t["fg"][3], t["field"])
     stdscr.bkgd(" ", curses.color_pair(5))
     return name
 
@@ -465,15 +472,23 @@ def draw_wizard_box(stdscr, sh, sw, top, left, bw, bh, title, values, active_i,
     # inactive views wrap identically and never reflow on focus).
     field_rows = (2, 3, 4)   # first row of each field, offset from top
     rows_per = (1, 1, 2)
+    # Labels are padded to the longest one so every field's text starts at
+    # the same column; the whole text region of each field is filled with
+    # the field tone (pair 7) so the fields read as editable text boxes.
+    label_w = max(len(l) for l in labels)
+    tcol = left + 2 + label_w + 1
+    twidth = max(1, bw - 4 - label_w - 1)
     for fi, (label, key) in enumerate(zip(labels, keys)):
         row0 = top + field_rows[fi]
         is_active = fi == active_i
         text = active_text if is_active else values[key]
-        lbl_attr = curses.color_pair(4) | curses.A_BOLD if is_active else curses.color_pair(4)
         if row0 < H - 1:
-            stdscr.addnstr(row0, left + 2, label + ":", bw - 4, lbl_attr)
-        tcol = left + 2 + len(label) + 1
-        twidth = max(1, bw - 4 - len(label) - 1)
+            stdscr.addnstr(row0, left + 2, label.ljust(label_w) + ":", bw - 4,
+                           curses.color_pair(6) | curses.A_BOLD)
+        for r in range(rows_per[fi]):
+            if row0 + r >= H - 1:
+                break
+            stdscr.addnstr(row0 + r, tcol, " " * twidth, twidth, curses.color_pair(7))
         if is_active:
             if rows_per[fi] == 1:
                 # visible slice around the cursor (the field scrolls, not the
@@ -483,7 +498,9 @@ def draw_wizard_box(stdscr, sh, sw, top, left, bw, bh, title, values, active_i,
                     for p in range(start, start + twidth):
                         ch = active_text[p] if p < len(active_text) else " "
                         in_sel = active_sel is not None and active_sel[0] <= p < active_sel[1]
-                        cell_attr = curses.A_REVERSE if (p == active_cur or in_sel) else 0
+                        cell_attr = curses.color_pair(7)
+                        if p == active_cur or in_sel:
+                            cell_attr |= curses.A_REVERSE
                         stdscr.addch(row0, tcol + (p - start), ch, cell_attr)
             else:
                 # two-row field: the field's two physical rows (row0, row0+1)
@@ -501,13 +518,16 @@ def draw_wizard_box(stdscr, sh, sw, top, left, bw, bh, title, values, active_i,
                     for p in range(lrow * twidth, (lrow + 1) * twidth):
                         ch = active_text[p] if p < len(active_text) else " "
                         in_sel = active_sel is not None and active_sel[0] <= p < active_sel[1]
-                        cell_attr = curses.A_REVERSE if (p == active_cur or in_sel) else 0
+                        cell_attr = curses.color_pair(7)
+                        if p == active_cur or in_sel:
+                            cell_attr |= curses.A_REVERSE
                         stdscr.addch(row, tcol + (p - lrow * twidth), ch, cell_attr)
         else:
             for r in range(rows_per[fi]):
                 if row0 + r >= H - 1:
                     break
-                stdscr.addnstr(row0 + r, tcol, text[r * twidth:(r + 1) * twidth], twidth)
+                stdscr.addnstr(row0 + r, tcol, text[r * twidth:(r + 1) * twidth], twidth,
+                               curses.color_pair(7))
     # action hint, anchored to the bottom of the box (one row above the
     # bottom border); bracketed keys in the button accent, like the main view
     if top + bh - 2 < H - 1:

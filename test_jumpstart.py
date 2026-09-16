@@ -15,7 +15,7 @@ import jumpstart_tui as jt  # noqa: E402  (import after curses mocking on purpos
 curses.start_color = lambda: None
 curses.COLORS = 256
 curses.init_pair = lambda p, f, b: p
-curses.color_pair = lambda p: 0
+curses.color_pair = lambda p: p
 curses.use_default_colors = lambda: None
 jt.run_selected = lambda name: (0, "started\npid=42\nlog=/tmp/fake.log")
 # clipboard stub: records every path asked to be copied (assert the exact arg)
@@ -45,19 +45,24 @@ class FakeScr:
     def __init__(self, h, w, keys=()):
         self.h, self.w = h, w
         self.grid = [[" "] * w for _ in range(h)]
+        self.attrs = [[0] * w for _ in range(h)]
         self.keys = list(keys)
         self.ooobad = 0
     def getmaxyx(self): return (self.h, self.w)
-    def erase(self): self.grid = [[" "] * self.w for _ in range(self.h)]
-    def _put(self, r, c, ch):
+    def erase(self):
+        self.grid = [[" "] * self.w for _ in range(self.h)]
+        self.attrs = [[0] * self.w for _ in range(self.h)]
+    def _put(self, r, c, ch, a=0):
         if 0 <= r < self.h and 0 <= c < self.w:
             self.grid[r][c] = ch
+            self.attrs[r][c] = a
         else:
             self.ooobad += 1
-    def addch(self, r, c, ch, *a): self._put(r, c, ch[0])
+    def addch(self, r, c, ch, *a): self._put(r, c, ch[0], a[0] if a else 0)
     def addnstr(self, r, c, s, n, *a):
+        at = a[0] if a else 0
         for i, ch in enumerate(s[:n]):
-            self._put(r, c + i, ch)
+            self._put(r, c + i, ch, at)
     def refresh(self): pass
     def getch(self): return self.keys.pop(0) if self.keys else -1
     def timeout(self, t): pass
@@ -169,18 +174,29 @@ check("wizard: edit rename", r == ("renamed", "d", "echo f"), r)
 # ---------- wizard layout: bottom-anchored hint + 2-line cmd field ----------
 # Geometry on FakeScr 24x80 (sh=23, sw=79): bw=60, bh=9, top=(23-9)//2=7,
 # left=(79-60)//2=9; field rows: name=9, desc=10, cmd=11+12; hint=top+7=14;
-# bottom border (= error row)=15. cmd: tcol=25 (left+2+len(label)+1,
-# "Shell command" is 13 chars, colon appended), twidth=42 (bw-4-len-1).
+# bottom border (= error row)=15. Labels padded to the longest ("Shell
+# command" = 13), colon at left+2+13=24, shared text column tcol=25,
+# twidth=42 (bw-4-13-1).
 def wiz_grid(keys, **kw):
     s = FakeScr(24, 80, keys)
     res = jt.command_wizard(s, 23, 79, cmds, **kw)
-    return res, ["".join(row) for row in s.grid], s.ooobad
+    return res, ["".join(row) for row in s.grid], s.attrs, s.ooobad
 
 TCOL, TWIDTH = 25, 42
 long_cmd = "curl -s http://example.com/api | jq . | head -n 50"
-res, rows, oob = wiz_grid(K("n1", [ESC]), cmd=long_cmd)
+res, rows, attrs, oob = wiz_grid(K("n1", [ESC]), cmd=long_cmd)
 check("wizlay: esc cancels (grid probe)", res is None, res)
 check("wizlay: cmd label row", "Shell command:" in rows[11], repr(rows[11]))
+# labels padded to the longest: same 13-char padded label, colon in the same
+# column (24), so every field's text starts at the shared column
+check("wizlay: labels padded to shared column",
+      rows[9][11:24] == "Command name " and rows[10][11:24] == "Description  "
+      and rows[11][11:24] == "Shell command"
+      and rows[9][24] == ":" and rows[10][24] == ":" and rows[11][24] == ":",
+      (rows[9][11:25], rows[10][11:25], rows[11][11:25]))
+# typed name text starts at the shared column (was one col left before)
+check("wizlay: name text at shared column", rows[9][TCOL:TCOL + 2] == "n1",
+      repr(rows[9][TCOL:TCOL + 4]))
 # inactive cmd field wraps onto two rows (hard split at twidth)
 check("wizlay: inactive cmd row 1", rows[11][TCOL:TCOL + TWIDTH] == long_cmd[:TWIDTH],
       repr(rows[11][TCOL:TCOL + TWIDTH]))
@@ -192,13 +208,21 @@ check("wizlay: inactive cmd row 2",
 check("wizlay: hint anchored at bottom",
       "[Enter] next" in rows[14] and "[Esc] cancel" in rows[14] and "select" not in rows[12],
       repr(rows[14]))
+# field boxes filled with the field tone (pair 7), labels in the button accent
+check("wizlay: field fill (name row)",
+      attrs[9][TCOL] == 7 and attrs[9][66] == 7
+      and attrs[9][24] == 6 | curses.A_BOLD,
+      (attrs[9][TCOL], attrs[9][66], attrs[9][24]))
+check("wizlay: field fill (both cmd rows)",
+      attrs[11][TCOL] == 7 and attrs[12][66] == 7,
+      (attrs[11][TCOL], attrs[12][66]))
 check("wizlay: no oob", oob == 0, oob)
 
 # active cmd field: 2 visible rows, vertically scrolled so the cursor (at the
 # end) is on the second row — Esc keeps the wizard open so the final frame
 # still shows the box (Enter would return to the main view)
 big_cmd = "echo " + "x" * 120 + " | tail"   # 132 chars -> 4 wrapped rows
-res, rows, oob = wiz_grid(K("n3", ENTER, "d", ENTER, big_cmd, [ESC]))
+res, rows, attrs, oob = wiz_grid(K("n3", ENTER, "d", ENTER, big_cmd, [ESC]))
 check("wizlay: esc on cmd cancels (grid probe)", res is None, res)
 nrows = (len(big_cmd) + TWIDTH - 1) // TWIDTH
 start_row = min(len(big_cmd) // TWIDTH - 1, nrows - 2)   # cursor on last line
@@ -208,11 +232,21 @@ check("wizlay: active cmd scrolled (prev line)",
 check("wizlay: active cmd scrolled (last line)",
       rows[12][TCOL:TCOL + TWIDTH] == (big_cmd[(start_row + 1) * TWIDTH:] + " " * TWIDTH)[:TWIDTH],
       repr(rows[12][TCOL:TCOL + TWIDTH]))
+# cursor cell: the blank cell just past the last char (active_cur == len)
+# -> reverse-video on the field tone, on the correct wrapped line
+active_cur = len(big_cmd)
+nrows = (len(big_cmd) + TWIDTH - 1) // TWIDTH
+start_row = min(len(big_cmd) // TWIDTH - 1, nrows - 2)
+cur_row = 11 + (active_cur // TWIDTH - start_row)
+cur_col = TCOL + (active_cur % TWIDTH)
+check("wizlay: active cmd fill + cursor",
+      attrs[11][66] == 7 and attrs[cur_row][cur_col] == 7 | curses.A_REVERSE,
+      (attrs[11][66], attrs[cur_row][cur_col], cur_row, cur_col))
 check("wizlay: long cmd no oob", oob == 0, oob)
 
 # error lands on the bottom border row (row 15): type a reserved name,
 # confirm it (error shows, name re-prompted), then Esc — last frame carries it
-res, rows, oob = wiz_grid(K("selected", ENTER, [ESC]))
+res, rows, attrs, oob = wiz_grid(K("selected", ENTER, [ESC]))
 check("wizlay: error on bottom border row", "name 'selected' is reserved" in rows[15],
       repr(rows[15]))
 check("wizlay: error no oob", oob == 0, oob)
