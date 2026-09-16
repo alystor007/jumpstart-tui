@@ -100,9 +100,18 @@ def save_commands(commands: dict, selected: str) -> bool:
 # "field" = background tone for editable text boxes (a step lighter than
 # the theme's bg). Pair 7.
 THEMES = {
-    "dark":      {"fg": [curses.COLOR_GREEN, curses.COLOR_RED, curses.COLOR_YELLOW, curses.COLOR_WHITE], "bg": curses.COLOR_BLACK, "btn": curses.COLOR_YELLOW, "field": curses.COLOR_BLUE},
-    "light":     {"fg": [curses.COLOR_BLUE,  curses.COLOR_RED, curses.COLOR_MAGENTA, curses.COLOR_BLACK], "bg": curses.COLOR_WHITE, "btn": curses.COLOR_BLUE, "field": curses.COLOR_CYAN},
-    "matrix":    {"fg": [curses.COLOR_GREEN, curses.COLOR_GREEN, curses.COLOR_GREEN, curses.COLOR_GREEN], "bg": curses.COLOR_BLACK, "btn": curses.COLOR_GREEN, "field": curses.COLOR_BLUE},
+    "dark":      {"fg": [curses.COLOR_GREEN, curses.COLOR_RED,
+                        curses.COLOR_YELLOW, curses.COLOR_WHITE],
+                  "bg": curses.COLOR_BLACK, "btn": curses.COLOR_YELLOW,
+                  "field": curses.COLOR_BLUE},
+    "light":     {"fg": [curses.COLOR_BLUE,  curses.COLOR_RED,
+                        curses.COLOR_MAGENTA, curses.COLOR_BLACK],
+                  "bg": curses.COLOR_WHITE, "btn": curses.COLOR_BLUE,
+                  "field": curses.COLOR_CYAN},
+    "matrix":    {"fg": [curses.COLOR_GREEN, curses.COLOR_GREEN,
+                        curses.COLOR_GREEN, curses.COLOR_GREEN],
+                  "bg": curses.COLOR_BLACK, "btn": curses.COLOR_GREEN,
+                  "field": curses.COLOR_BLUE},
     "solarized": {"fg": [64, 166, 172, 252],  "bg": 235, "btn": 178, "field": 237},
     "gruvbox":   {"fg": [142, 167, 215, 223], "bg": 235, "btn": 216, "field": 237},
     "nord":      {"fg": [108, 173, 179, 252], "bg": 235, "btn": 117, "field": 237},
@@ -475,7 +484,7 @@ def draw_wizard_box(stdscr, sh, sw, top, left, bw, bh, title, values, active_i,
     # Labels are padded to the longest one so every field's text starts at
     # the same column; the whole text region of each field is filled with
     # the field tone (pair 7) so the fields read as editable text boxes.
-    label_w = max(len(l) for l in labels)
+    label_w = max(len(label) for label in labels)
     tcol = left + 2 + label_w + 1
     twidth = max(1, bw - 4 - label_w - 1)
     for fi, (label, key) in enumerate(zip(labels, keys)):
