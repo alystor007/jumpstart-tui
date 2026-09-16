@@ -166,6 +166,57 @@ r = wizard(K(BSP * 1, "renamed", ENTER, BSP * 3, "d", ENTER, BSP * 6, "echo f", 
            cmds, old_name="a", desc="old", cmd="echo a")
 check("wizard: edit rename", r == ("renamed", "d", "echo f"), r)
 
+# ---------- wizard layout: bottom-anchored hint + 2-line cmd field ----------
+# Geometry on FakeScr 24x80 (sh=23, sw=79): bw=60, bh=9, top=(23-9)//2=7,
+# left=(79-60)//2=9; field rows: name=9, desc=10, cmd=11+12; hint=top+7=14;
+# bottom border (= error row)=15. cmd: tcol=25 (left+2+len(label)+1,
+# "Shell command" is 13 chars, colon appended), twidth=42 (bw-4-len-1).
+def wiz_grid(keys, **kw):
+    s = FakeScr(24, 80, keys)
+    res = jt.command_wizard(s, 23, 79, cmds, **kw)
+    return res, ["".join(row) for row in s.grid], s.ooobad
+
+TCOL, TWIDTH = 25, 42
+long_cmd = "curl -s http://example.com/api | jq . | head -n 50"
+res, rows, oob = wiz_grid(K("n1", [ESC]), cmd=long_cmd)
+check("wizlay: esc cancels (grid probe)", res is None, res)
+check("wizlay: cmd label row", "Shell command:" in rows[11], repr(rows[11]))
+# inactive cmd field wraps onto two rows (hard split at twidth)
+check("wizlay: inactive cmd row 1", rows[11][TCOL:TCOL + TWIDTH] == long_cmd[:TWIDTH],
+      repr(rows[11][TCOL:TCOL + TWIDTH]))
+check("wizlay: inactive cmd row 2",
+      rows[12][TCOL:TCOL + len(long_cmd) - TWIDTH] == long_cmd[TWIDTH:],
+      repr(rows[12][TCOL:TCOL + len(long_cmd) - TWIDTH]))
+# hint anchored to the bottom: one row above the bottom border (row 14),
+# NOT on the old row 12 which now holds the second cmd line
+check("wizlay: hint anchored at bottom",
+      "[Enter] next" in rows[14] and "[Esc] cancel" in rows[14] and "select" not in rows[12],
+      repr(rows[14]))
+check("wizlay: no oob", oob == 0, oob)
+
+# active cmd field: 2 visible rows, vertically scrolled so the cursor (at the
+# end) is on the second row — Esc keeps the wizard open so the final frame
+# still shows the box (Enter would return to the main view)
+big_cmd = "echo " + "x" * 120 + " | tail"   # 132 chars -> 4 wrapped rows
+res, rows, oob = wiz_grid(K("n3", ENTER, "d", ENTER, big_cmd, [ESC]))
+check("wizlay: esc on cmd cancels (grid probe)", res is None, res)
+nrows = (len(big_cmd) + TWIDTH - 1) // TWIDTH
+start_row = min(len(big_cmd) // TWIDTH - 1, nrows - 2)   # cursor on last line
+check("wizlay: active cmd scrolled (prev line)",
+      rows[11][TCOL:TCOL + TWIDTH] == big_cmd[start_row * TWIDTH:(start_row + 1) * TWIDTH],
+      repr(rows[11][TCOL:TCOL + TWIDTH]))
+check("wizlay: active cmd scrolled (last line)",
+      rows[12][TCOL:TCOL + TWIDTH] == (big_cmd[(start_row + 1) * TWIDTH:] + " " * TWIDTH)[:TWIDTH],
+      repr(rows[12][TCOL:TCOL + TWIDTH]))
+check("wizlay: long cmd no oob", oob == 0, oob)
+
+# error lands on the bottom border row (row 15): type a reserved name,
+# confirm it (error shows, name re-prompted), then Esc — last frame carries it
+res, rows, oob = wiz_grid(K("selected", ENTER, [ESC]))
+check("wizlay: error on bottom border row", "name 'selected' is reserved" in rows[15],
+      repr(rows[15]))
+check("wizlay: error no oob", oob == 0, oob)
+
 # ---------- full main() ----------
 os.makedirs(os.path.join(TMP, ".config", "jumpstart"), exist_ok=True)
 seed = {"selected": "a",

@@ -441,8 +441,10 @@ def _name_error(name: str, commands: dict, old_name: str) -> str:
 
 def draw_wizard_box(stdscr, sh, sw, top, left, bw, bh, title, values, active_i,
                     error, active_text, active_cur, active_sel=None):
-    """Draw the wizard box: border, title, the three fields (the active one
-    with the live editor text + reverse-video cursor), hint, error line."""
+    """Draw the wizard box: border, title, the three fields (name/desc one
+    row each, cmd wrapped across two rows; the active one with the live
+    editor text + reverse-video cursor), the action hint anchored to the
+    bottom (bracketed keys in the button accent), and the error line."""
     labels = ("Command name", "Description", "Shell command")
     keys = ("name", "desc", "cmd")
     attr = curses.color_pair(4)
@@ -458,29 +460,60 @@ def draw_wizard_box(stdscr, sh, sw, top, left, bw, bh, title, values, active_i,
     stdscr.addnstr(top, left + 1, "─" * (bw - 2), bw - 2, attr)
     stdscr.addnstr(top + bh - 1, left + 1, "─" * (bw - 2), bw - 2, attr)
     stdscr.addnstr(top, left + 2, title, bw - 4, curses.color_pair(3) | curses.A_BOLD)
+    # Field layout: name and description get one row each; the shell command
+    # wraps across two rows (hard-split at the field width, so the active and
+    # inactive views wrap identically and never reflow on focus).
+    field_rows = (2, 3, 4)   # first row of each field, offset from top
+    rows_per = (1, 1, 2)
     for fi, (label, key) in enumerate(zip(labels, keys)):
-        row = top + 2 + fi
-        if row >= H - 1:
-            break
+        row0 = top + field_rows[fi]
         is_active = fi == active_i
         text = active_text if is_active else values[key]
         lbl_attr = curses.color_pair(4) | curses.A_BOLD if is_active else curses.color_pair(4)
-        stdscr.addnstr(row, left + 2, label + ":", bw - 4, lbl_attr)
+        if row0 < H - 1:
+            stdscr.addnstr(row0, left + 2, label + ":", bw - 4, lbl_attr)
         tcol = left + 2 + len(label) + 1
         twidth = max(1, bw - 4 - len(label) - 1)
         if is_active:
-            # visible slice around the cursor (the field scrolls, not the box);
-            # selected range and the cursor cell are drawn reverse-video
-            start = max(0, min(active_cur - 1, len(active_text) - twidth)) if len(active_text) > twidth else 0
-            for p in range(start, start + twidth):
-                ch = active_text[p] if p < len(active_text) else " "
-                in_sel = active_sel is not None and active_sel[0] <= p < active_sel[1]
-                cell_attr = curses.A_REVERSE if (p == active_cur or in_sel) else 0
-                stdscr.addch(row, tcol + (p - start), ch, cell_attr)
+            if rows_per[fi] == 1:
+                # visible slice around the cursor (the field scrolls, not the
+                # box); selected range and the cursor cell are reverse-video
+                start = max(0, min(active_cur - 1, len(active_text) - twidth)) if len(active_text) > twidth else 0
+                if row0 < H - 1:
+                    for p in range(start, start + twidth):
+                        ch = active_text[p] if p < len(active_text) else " "
+                        in_sel = active_sel is not None and active_sel[0] <= p < active_sel[1]
+                        cell_attr = curses.A_REVERSE if (p == active_cur or in_sel) else 0
+                        stdscr.addch(row0, tcol + (p - start), ch, cell_attr)
+            else:
+                # two-row field: the field's two physical rows (row0, row0+1)
+                # show a sliding 2-row window of the hard-wrapped text; the
+                # window is clamped so the cursor's line is always visible
+                # (never further than one row from the top of the window);
+                # selected range and the cursor cell are reverse-video
+                nrows = max(1, (len(active_text) + twidth - 1) // twidth)
+                start_row = max(0, min(active_cur // twidth - 1, nrows - 2))
+                for rr in range(2):
+                    row = row0 + rr
+                    if row >= H - 1:
+                        break
+                    lrow = start_row + rr
+                    for p in range(lrow * twidth, (lrow + 1) * twidth):
+                        ch = active_text[p] if p < len(active_text) else " "
+                        in_sel = active_sel is not None and active_sel[0] <= p < active_sel[1]
+                        cell_attr = curses.A_REVERSE if (p == active_cur or in_sel) else 0
+                        stdscr.addch(row, tcol + (p - lrow * twidth), ch, cell_attr)
         else:
-            stdscr.addnstr(row, tcol, text, twidth)
-    stdscr.addnstr(top + 5, left + 2, "[^v] select  [Enter] next  [Esc] cancel", bw - 4, attr)
-    if error:
+            for r in range(rows_per[fi]):
+                if row0 + r >= H - 1:
+                    break
+                stdscr.addnstr(row0 + r, tcol, text[r * twidth:(r + 1) * twidth], twidth)
+    # action hint, anchored to the bottom of the box (one row above the
+    # bottom border); bracketed keys in the button accent, like the main view
+    if top + bh - 2 < H - 1:
+        draw_hint(stdscr, top + bh - 2, left + 2, "[^v] select  [Enter] next  [Esc] cancel",
+                  left + bw - 1)
+    if error and top + bh - 1 < H - 1:
         stdscr.addnstr(top + bh - 1, left + 1, error, bw - 2, curses.color_pair(2))
 
 
@@ -488,7 +521,7 @@ def command_wizard(stdscr, sh, sw, commands, old_name="", desc="", cmd="") -> tu
     """Central overlay for defining (old_name='') or editing a command.
     Returns (name, desc, cmd) on save, None on Esc."""
     bw = max(10, min(60, sw - 2))
-    bh = 8
+    bh = 9
     top = max(0, (sh - bh) // 2)
     left = max(1, (sw - bw) // 2)
     title = f"Edit: {old_name}" if old_name else "New command"
