@@ -18,9 +18,12 @@ Keys:
   e       -> Edit the highlighted command
   d       -> Delete the highlighted command (y/N confirm)
   l       -> Copy the newest log file path to the clipboard
+            (in the log panel: the selected one)
+  Tab     -> Drop the selector into the log panel (Tab / Esc back)
+            (in the log panel: Enter opens a live tail -f of the selected log)
   t       -> Cycle theme (saved between runs)
   ?       -> Help overlay
-  q / Esc -> Quit
+  q / Esc -> Quit (Esc in the log panel returns to the command list)
 """
 
 import curses
@@ -32,7 +35,7 @@ import subprocess
 import sys
 import textwrap
 
-__version__ = "1.1.0"   # bump in the same commit as the git tag
+__version__ = "1.3.0"   # bump in the same commit as the git tag
 
 # ============================================================
 #  SCRIPTS
@@ -219,17 +222,42 @@ def prepend_log(log: str, entry: str) -> str:
     return entry if not log else entry + "\n" + log
 
 
-def _latest_log_path() -> str | None:
-    """Path of the newest log file in LOG_DIR (by mtime), or None if there are
-    none. Reads the directory (not memory) so it still works after a restart."""
+def _log_files() -> list[str]:
+    """Log files in LOG_DIR, newest first (by mtime).
+
+    Reads the directory (not memory) on every call, so new runs show up
+    live and a restart loses nothing."""
     try:
         entries = [os.path.join(LOG_DIR, f) for f in os.listdir(LOG_DIR)]
     except OSError:
-        return None
+        return []
     logs = [p for p in entries if p.endswith(".log")]
-    if not logs:
+    return sorted(logs, key=lambda p: os.path.getmtime(p), reverse=True)
+
+
+def _latest_log_path() -> str | None:
+    """Path of the newest log file in LOG_DIR (by mtime), or None if there are
+    none."""
+    files = _log_files()
+    return files[0] if files else None
+
+
+def _tail_text(path: str, nbytes: int = 65536) -> str | None:
+    """Last `nbytes` of the file as text, dropping a partial first line
+    (seek-from-end so a huge log never gets slurped). None if unreadable."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - nbytes))
+            data = f.read().decode("utf-8", "replace")
+    except OSError:
         return None
-    return max(logs, key=lambda p: os.path.getmtime(p))
+    if size > nbytes:
+        nl = data.find("\n")
+        if nl != -1:
+            data = data[nl + 1:]
+    return data
 
 
 def _copy_to_clipboard(text: str) -> tuple[bool, str]:
@@ -634,6 +662,78 @@ def confirm(stdscr, sh, sw, question: str) -> bool:
         stdscr.timeout(100)
 
 
+def tail_viewer(stdscr, sh, sw, path: str) -> None:
+    """Blocking modal: live `tail -f` of one log file.
+
+    Overlays the TUI (does NOT erase it): the box is drawn on top of the
+    existing screen, so the command list stays visible around it. Centered
+    box with the file name + full path, then a bottom-anchored window of the
+    file's last lines. Re-reads every 250 ms (a getch timeout tick), so new
+    output appears at the bottom like `tail -f`. Esc/q closes (the main
+    loop's erase+redraw restores the TUI); a resize just re-renders at the
+    new size; an unreadable file shows an error line (Esc still closes)."""
+    name = os.path.basename(path)
+
+    def draw():
+        H, W = stdscr.getmaxyx()
+        bw2 = max(30, min(120, max(1, W - 4)))
+        bh2 = max(10, min(15, max(1, H - 4)))
+        top2 = max(0, (H - bh2) // 2)
+        left2 = max(1, (W - bw2) // 2)
+        inner2 = max(2, bw2 - 4)
+        win_h2 = max(1, bh2 - 4)
+        sh2 = max(1, H - 1)
+        # No stdscr.erase(): this is an overlay, not a new screen. The box
+        # fully repaints its own interior each tick (below), and the main
+        # loop's erase+redraw restores the TUI once the modal returns.
+        for r in range(top2, top2 + bh2):
+            if r < sh2:
+                stdscr.addnstr(r, left2, " " * bw2, bw2)
+        for r in range(top2, top2 + bh2):
+            if r >= sh2:
+                break
+            stdscr.addch(r, left2, "┌" if r == top2 else ("└" if r == top2 + bh2 - 1 else "│"))
+            stdscr.addch(r, left2 + bw2 - 1, "┐" if r == top2 else ("┘" if r == top2 + bh2 - 1 else "│"))
+        if top2 < sh2:
+            stdscr.addnstr(top2, left2 + 1, "─" * (bw2 - 2), bw2 - 2, curses.color_pair(4))
+        if top2 + bh2 - 1 < sh2:
+            stdscr.addnstr(top2 + bh2 - 1, left2 + 1, "─" * (bw2 - 2), bw2 - 2, curses.color_pair(4))
+        if top2 < sh2:
+            stdscr.addnstr(top2, left2 + 2, f"tail -f: {name}", bw2 - 4,
+                           curses.color_pair(3) | curses.A_BOLD)
+        if top2 + 1 < sh2:
+            stdscr.addnstr(top2 + 1, left2 + 2, path, inner2, curses.color_pair(4))
+        err = ""
+        text = _tail_text(path)
+        if text is None:
+            err = "cannot read the log file"
+        else:
+            lines = text.splitlines()
+            if not lines:
+                lines = ["(empty log)"]
+            last = lines[-win_h2:]
+            for i, line in enumerate(last):
+                row = top2 + bh2 - 3 - (len(last) - 1 - i)
+                if top2 + 2 <= row < sh2:
+                    stdscr.addnstr(row, left2 + 2, line, inner2, curses.color_pair(4))
+        if top2 + bh2 - 2 < sh2:
+            draw_hint(stdscr, top2 + bh2 - 2, left2 + 2, "[Esc] close", left2 + bw2 - 1)
+        if err and top2 + bh2 - 1 < sh2:
+            stdscr.addnstr(top2 + bh2 - 1, left2 + 1, err, bw2 - 2, curses.color_pair(2))
+        stdscr.refresh()
+
+    stdscr.timeout(250)
+    try:
+        while True:
+            draw()
+            c = _main_getch(stdscr)
+            stdscr.timeout(250)   # _main_getch's Esc peek resets the tick
+            if c in (27, ord("q")):
+                return
+    finally:
+        stdscr.timeout(100)
+
+
 # ============================================================
 #  BANNER  —  "JUMP" (header) + "START" (body)
 # ============================================================
@@ -658,8 +758,10 @@ HELP_TEXT = [
     "  d ...... delete the highlighted command (y/N)",
     "  c ...... clone the highlighted command",
     "  l ...... copy the newest log file path to the clipboard",
+    "  Tab .... drop the selector into the log panel",
     "  t ...... cycle color theme",
-    "  q / Esc . quit",
+    "  q / Esc . quit (Esc in the log panel returns to the list)",
+    "  log panel. ↑/↓ select, Enter tail -f, l copy, Tab/Esc back",
     "  fields  . arrows move, Bksp/Del edit, Enter next, Esc cancel",
     "  ? ...... toggle this help",
     "",
@@ -669,15 +771,15 @@ HELP_TEXT = [
 
 
 # Minimum window that can render the full layout — border, banner, hint,
-# the main area with the ? help overlay (the tallest content, 14 lines),
-# log panel, footer. Below this, the TUI shows a "window too small" notice
-# instead of a broken layout; the check re-runs every frame, so a live
-# resize in either direction is picked up automatically. Derived from the
-# render's own math: MIN_COLS from the hint line (109 chars at col PAD +
-# border margin); MIN_ROWS from the worst-case row stack (banner block
-# through 14 help lines, the log separator row, the 3-row log panel, the
-# footer).
-MIN_ROWS = 29
+# the main area with the ? help overlay (the tallest content, 16 lines),
+# log panel (header + 4 lines), footer. Below this, the TUI shows a
+# "window too small" notice instead of a broken layout; the check re-runs
+# every frame, so a live resize in either direction is picked up
+# automatically. Derived from the render's own math: MIN_COLS from the hint
+# line (109 chars at col PAD + border margin); MIN_ROWS from the worst-case
+# row stack (banner block through 16 help lines, the log separator row, the
+# 5-row log panel, the footer).
+MIN_ROWS = 33
 MIN_COLS = 116
 
 
@@ -694,6 +796,12 @@ def main(stdscr):
 
     help_overlay = False
     log = ""
+    # focus: "cmd" = the selector is in the command list (the default);
+    # "log" = the selector is in the log panel (TAB drops it there,
+    # TAB/Esc bring it back). log_sel is the selected log file path —
+    # session-only, never persisted.
+    focus = "cmd"
+    log_sel = ""
     # UI tick: getch returns -1 after 100ms -> smooth redraws.
     stdscr.timeout(100)
 
@@ -701,8 +809,12 @@ def main(stdscr):
     # buffer (erase + redraw); refresh() diffs it against the physical
     # screen and pushes only the changed cells (steady state: none).
     while True:
-        hint = ("[↑↓] move  [Enter] run  [n] new  [e] edit  [d] delete  "
-                "[c] clone  [l] copy log  [t] theme  [q] quit  [?] help")
+        if focus == "cmd":
+            hint = ("[↑↓] move  [Enter] run  [n] new  [e] edit  [d] delete  "
+                    "[c] clone  [l] copy log  [Tab] logs  [q] quit  [?] help")
+        else:
+            hint = ("[↑↓] select  [Enter] tail -f  [l] copy  [Tab] back  "
+                    "[t] theme  [q] quit  [?] help")
         log_lines = (log or "(no action yet)").splitlines()
 
         # --- render ------------------------------------------------------
@@ -779,10 +891,12 @@ def main(stdscr):
         if selected not in names:
             selected = names[0] if names else ""
         sel_idx = names.index(selected) if selected in names else -1
-        # The log panel is anchored to the bottom of the screen (its header
-        # sits 2 rows above the footer, leaving room for up to 2 lines);
-        # the main list area gets whatever rows are left above it.
-        log_h = max(0, min(3, (sh - 2) - main_row))
+        # The log panel is anchored to the bottom of the screen and is
+        # ALWAYS 5 rows tall ("Log:" header + 4 content rows — 3 info rows +
+        # 1 spacer), so its size never changes with focus: unfocused it shows
+        # the last 3 action lines, focused a 3-slot scrolling window over the
+        # log files; the main list area gets whatever rows are left above it.
+        log_h = max(0, min(5, (sh - 2) - main_row))
         fit = max(0, (sh - 2) - main_row - log_h)   # rows for the list area
         last_used = main_row
         if not help_overlay and names:
@@ -802,12 +916,17 @@ def main(stdscr):
                     stdscr.addch(main_row + i, div_col, "\u2502", curses.color_pair(4))
             # keep the highlighted row visible: scroll the list, not the screen
             top_idx = max(0, min(sel_idx - list_fit + 1, len(names) - list_fit)) if sel_idx >= list_fit else 0
+            # while the selector is in the log panel (focus=="log") the command
+            # list is shown with NO active highlight — the selection is "parked"
+            # (the real selected is kept, so the scroll position survives) and
+            # TAB/Esc back restore the same highlight instantly.
+            hl = selected if focus == "cmd" else ""
             for i in range(list_fit):
                 idx = top_idx + i
                 if idx >= len(names):
                     break
                 name = names[idx]
-                is_sel = name == selected
+                is_sel = name == hl
                 mark = "*" if is_sel else " "
                 row_attr = curses.color_pair(1) | curses.A_BOLD if is_sel else curses.color_pair(4)
                 num = idx + 1   # 1-based position, survives list scrolling
@@ -844,8 +963,14 @@ def main(stdscr):
         last_used = min(max(last_used, main_row), sh - 2)
 
         # --- log: anchored to the bottom of the screen ---
+        # The panel is ALWAYS 5 rows tall ("Log:" header + 4 content rows), so
+        # its size never changes with focus. Of the 4 content rows, 3 carry
+        # the info and the 4th is left blank as a spacer above the footer:
+        # unfocused = last 3 action lines, focused = a 3-slot scrolling window
+        # over the log files (newest first, '*' on the selected one).
         if log_h > 0:
-            log_top = sh - 1 - log_h      # "Log:" header; up to 2 lines below
+            log_top = sh - 1 - log_h      # "Log:" header
+            slots = min(3, log_h - 1)     # content rows (the rest is spacer)
             # bottom line of the list area, pinned to the log section: it sits
             # one row above the "Log:" header, not where the content ends
             bottom_line = log_top - 1
@@ -853,18 +978,49 @@ def main(stdscr):
                 divider(bottom_line)      # always, even with few rows of content
             stdscr.addnstr(log_top, PAD, "Log:", sw,
                            curses.color_pair(4) | curses.A_BOLD)
-            for i, line in enumerate(log_lines[:log_h - 1]):
-                # clip to the safe width from PAD (a full log path is long) so
-                # the line never reaches the right border
-                stdscr.addnstr(log_top + 1 + i, PAD, line, sw - PAD,
-                               curses.color_pair(4))
+            if focus == "log":
+                log_paths = _log_files()
+                if not log_sel or log_sel not in log_paths:
+                    log_sel = log_paths[0] if log_paths else ""
+                if log_paths:
+                    sel_i = log_paths.index(log_sel)
+                    # keep the selected file visible: the 3 slots form a
+                    # sliding window that follows the selection through ALL
+                    # log files (same clamp-to-ends behavior as the cmd list)
+                    top_i = max(0, min(sel_i - slots + 1, len(log_paths) - slots))
+                    for i in range(min(slots, len(log_paths))):
+                        idx = top_i + i
+                        if idx >= len(log_paths):
+                            break
+                        p = log_paths[idx]
+                        is_sel = p == log_sel
+                        mark = "*" if is_sel else " "
+                        attr = curses.color_pair(1) | curses.A_BOLD if is_sel else curses.color_pair(4)
+                        stdscr.addnstr(log_top + 1 + i, PAD,
+                                       f"{mark} {idx + 1:>2} {os.path.basename(p)}",
+                                       sw - PAD, attr)
+                else:
+                    stdscr.addnstr(log_top + 1, PAD, "(no log files)",
+                                   sw - PAD, curses.color_pair(4))
+            else:
+                for i, line in enumerate(log_lines[:slots]):
+                    # clip to the safe width from PAD (a full log path is
+                    # long) so the line never reaches the right border
+                    stdscr.addnstr(log_top + 1 + i, PAD, line, sw - PAD,
+                                   curses.color_pair(4))
 
         stdscr.addnstr(sh - 1, 0, ("─" * sw), sw)   # footer (never last row)
         border(stdscr, h, w)
         # footer: version bottom-left; theme/selected note right-aligned on
         # the same row (truncated so it never overruns into the version)
         ver = f"Jumpstart TUI v{__version__} "
-        note = f" theme: {theme} [t]   selected: {selected or '-'} "
+        # footer note: the selected log's full path while the log panel is
+        # focused, else theme + selected command (both truncated from the
+        # left when too long, keeping the right part)
+        if focus == "log" and log_sel:
+            note = f" log: {log_sel} "
+        else:
+            note = f" theme: {theme} [t]   selected: {selected or '-'} "
         if len(note) > w - len(ver):
             note = "…" + note[1 - (w - len(ver)):]   # keep the right part
         stdscr.addnstr(sh - 1, 1, ver, w, curses.color_pair(4) | curses.A_BOLD)
@@ -883,12 +1039,51 @@ def main(stdscr):
         if c in (27, ord("q")):
             if help_overlay:
                 help_overlay = False
+            elif c == 27 and focus == "log":
+                focus = "cmd"    # Esc in the log panel goes back, not out
             else:
                 break
             continue
         if help_overlay:
             if c in (ord("?"), ord("h")):
                 help_overlay = False
+            continue
+        if c == 9:               # Tab: drop the selector into the log panel
+            focus = "cmd" if focus == "log" else "log"
+            continue
+        if c in (ord("?"), ord("h")):
+            help_overlay = True
+            continue
+        if c == ord("t"):
+            theme = apply_theme(stdscr, next_theme(theme))
+            save_theme(theme)
+            log = prepend_log(log, f"[theme] switched to {theme}")
+            continue
+        if focus == "log":
+            if c in ("up", curses.KEY_UP):
+                log_paths = _log_files()
+                if log_sel in log_paths:
+                    i = log_paths.index(log_sel)
+                    if i > 0:
+                        log_sel = log_paths[i - 1]
+            elif c in ("down", curses.KEY_DOWN):
+                log_paths = _log_files()
+                if log_sel in log_paths:
+                    i = log_paths.index(log_sel)
+                    if i < len(log_paths) - 1:
+                        log_sel = log_paths[i + 1]
+            elif c == ord("l"):
+                if not log_sel:
+                    log = prepend_log(log, f"[err] no log files in {LOG_DIR}")
+                else:
+                    ok, how = _copy_to_clipboard(log_sel)
+                    if ok:
+                        log = prepend_log(log, f"[copy] {how}: {log_sel}")
+                    else:
+                        log = prepend_log(log, f"[err] copy failed ({how})")
+            elif c == 10 or c == 13 or c == curses.KEY_ENTER:
+                if log_sel:
+                    tail_viewer(stdscr, sh, sw, log_sel)
             continue
         if c in ("up", curses.KEY_UP):
             if names and sel_idx > 0:
