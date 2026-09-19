@@ -77,7 +77,7 @@ def check(name, cond, extra=""):
 
 # ---------- _edit_loop ----------
 def edit(keys, initial=""):
-    scr = FakeScr(24, 80, keys)
+    scr = FakeScr(30, 120, keys)
     return jt._edit_loop(scr, initial, lambda t, c, s: None)
 
 r = edit(K("abc", ENTER))
@@ -136,8 +136,8 @@ check("sel: enter returns full text (selection is visual)", r == "hello", r)
 
 # ---------- confirm ----------
 def confirm(keys):
-    scr = FakeScr(24, 80, keys)
-    return jt.confirm(scr, 23, 79, "Delete 'x'?")
+    scr = FakeScr(30, 120, keys)
+    return jt.confirm(scr, 29, 119, "Delete 'x'?")
 check("confirm: y", confirm(K("y")))
 check("confirm: Y", confirm(K("Y")))
 check("confirm: n", not confirm(K("n")))
@@ -148,8 +148,8 @@ check("confirm: other ignored", confirm(K("hjy")))
 
 # ---------- wizard ----------
 def wizard(keys, commands, **kw):
-    scr = FakeScr(24, 80, keys)
-    return jt.command_wizard(scr, 23, 79, commands, **kw)
+    scr = FakeScr(30, 120, keys)
+    return jt.command_wizard(scr, 29, 119, commands, **kw)
 
 cmds = {"a": {"desc": "", "cmd": "echo a"}, "b": {"desc": "", "cmd": "echo b"}}
 r = wizard(K("new1", ENTER, "my desc", ENTER, "echo hi", ENTER), cmds)
@@ -172,50 +172,50 @@ r = wizard(K(BSP * 1, "renamed", ENTER, BSP * 3, "d", ENTER, BSP * 6, "echo f", 
 check("wizard: edit rename", r == ("renamed", "d", "echo f"), r)
 
 # ---------- wizard layout: bottom-anchored hint + 2-line cmd field ----------
-# Geometry on FakeScr 24x80 (sh=23, sw=79): bw=60, bh=9, top=(23-9)//2=7,
-# left=(79-60)//2=9; field rows: name=9, desc=10, cmd=11+12; hint=top+7=14;
-# bottom border (= error row)=15. Labels padded to the longest ("Shell
-# command" = 13), colon at left+2+13=24, shared text column tcol=25,
+# Geometry on FakeScr 30x120 (sh=29, sw=119): bw=60, bh=9, top=(29-9)//2=10,
+# left=(119-60)//2=29; field rows: name=12, desc=13, cmd=14+15; hint=top+7=17;
+# bottom border (= error row)=18. Labels padded to the longest ("Shell
+# command" = 13), colon at left+2+13=44, shared text column tcol=45,
 # twidth=42 (bw-4-13-1).
 def wiz_grid(keys, **kw):
-    s = FakeScr(24, 80, keys)
-    res = jt.command_wizard(s, 23, 79, cmds, **kw)
+    s = FakeScr(30, 120, keys)
+    res = jt.command_wizard(s, 29, 119, cmds, **kw)
     return res, ["".join(row) for row in s.grid], s.attrs, s.ooobad
 
-TCOL, TWIDTH = 25, 42
+TCOL, TWIDTH = 45, 42
 long_cmd = "curl -s http://example.com/api | jq . | head -n 50"
 res, rows, attrs, oob = wiz_grid(K("n1", [ESC]), cmd=long_cmd)
 check("wizlay: esc cancels (grid probe)", res is None, res)
-check("wizlay: cmd label row", "Shell command:" in rows[11], repr(rows[11]))
+check("wizlay: cmd label row", "Shell command:" in rows[14], repr(rows[14]))
 # labels padded to the longest: same 13-char padded label, colon in the same
-# column (24), so every field's text starts at the shared column
+# column (44), so every field's text starts at the shared column
 check("wizlay: labels padded to shared column",
-      rows[9][11:24] == "Command name " and rows[10][11:24] == "Description  "
-      and rows[11][11:24] == "Shell command"
-      and rows[9][24] == ":" and rows[10][24] == ":" and rows[11][24] == ":",
-      (rows[9][11:25], rows[10][11:25], rows[11][11:25]))
+      rows[12][31:44] == "Command name " and rows[13][31:44] == "Description  "
+      and rows[14][31:44] == "Shell command"
+      and rows[12][44] == ":" and rows[13][44] == ":" and rows[14][44] == ":",
+      (rows[12][31:45], rows[13][31:45], rows[14][31:45]))
 # typed name text starts at the shared column (was one col left before)
-check("wizlay: name text at shared column", rows[9][TCOL:TCOL + 2] == "n1",
-      repr(rows[9][TCOL:TCOL + 4]))
+check("wizlay: name text at shared column", rows[12][TCOL:TCOL + 2] == "n1",
+      repr(rows[12][TCOL:TCOL + 4]))
 # inactive cmd field wraps onto two rows (hard split at twidth)
-check("wizlay: inactive cmd row 1", rows[11][TCOL:TCOL + TWIDTH] == long_cmd[:TWIDTH],
-      repr(rows[11][TCOL:TCOL + TWIDTH]))
+check("wizlay: inactive cmd row 1", rows[14][TCOL:TCOL + TWIDTH] == long_cmd[:TWIDTH],
+      repr(rows[14][TCOL:TCOL + TWIDTH]))
 check("wizlay: inactive cmd row 2",
-      rows[12][TCOL:TCOL + len(long_cmd) - TWIDTH] == long_cmd[TWIDTH:],
-      repr(rows[12][TCOL:TCOL + len(long_cmd) - TWIDTH]))
-# hint anchored to the bottom: one row above the bottom border (row 14),
-# NOT on the old row 12 which now holds the second cmd line
+      rows[15][TCOL:TCOL + len(long_cmd) - TWIDTH] == long_cmd[TWIDTH:],
+      repr(rows[15][TCOL:TCOL + len(long_cmd) - TWIDTH]))
+# hint anchored to the bottom: one row above the bottom border (row 17),
+# NOT on the old row 15 which now holds the second cmd line
 check("wizlay: hint anchored at bottom",
-      "[Enter] next" in rows[14] and "[Esc] cancel" in rows[14] and "select" not in rows[12],
-      repr(rows[14]))
+      "[Enter] next" in rows[17] and "[Esc] cancel" in rows[17] and "select" not in rows[15],
+      repr(rows[17]))
 # field boxes filled with the field tone (pair 7), labels in the button accent
 check("wizlay: field fill (name row)",
-      attrs[9][TCOL] == 7 and attrs[9][66] == 7
-      and attrs[9][24] == 6 | curses.A_BOLD,
-      (attrs[9][TCOL], attrs[9][66], attrs[9][24]))
+      attrs[12][TCOL] == 7 and attrs[12][TCOL + TWIDTH - 1] == 7
+      and attrs[12][44] == (6 | curses.A_BOLD),
+      (attrs[12][TCOL], attrs[12][TCOL + TWIDTH - 1], attrs[12][44]))
 check("wizlay: field fill (both cmd rows)",
-      attrs[11][TCOL] == 7 and attrs[12][66] == 7,
-      (attrs[11][TCOL], attrs[12][66]))
+      attrs[14][TCOL] == 7 and attrs[15][TCOL + TWIDTH - 1] == 7,
+      (attrs[14][TCOL], attrs[15][TCOL + TWIDTH - 1]))
 check("wizlay: no oob", oob == 0, oob)
 
 # active cmd field: 2 visible rows, vertically scrolled so the cursor (at the
@@ -227,28 +227,28 @@ check("wizlay: esc on cmd cancels (grid probe)", res is None, res)
 nrows = (len(big_cmd) + TWIDTH - 1) // TWIDTH
 start_row = min(len(big_cmd) // TWIDTH - 1, nrows - 2)   # cursor on last line
 check("wizlay: active cmd scrolled (prev line)",
-      rows[11][TCOL:TCOL + TWIDTH] == big_cmd[start_row * TWIDTH:(start_row + 1) * TWIDTH],
-      repr(rows[11][TCOL:TCOL + TWIDTH]))
+      rows[14][TCOL:TCOL + TWIDTH] == big_cmd[start_row * TWIDTH:(start_row + 1) * TWIDTH],
+      repr(rows[14][TCOL:TCOL + TWIDTH]))
 check("wizlay: active cmd scrolled (last line)",
-      rows[12][TCOL:TCOL + TWIDTH] == (big_cmd[(start_row + 1) * TWIDTH:] + " " * TWIDTH)[:TWIDTH],
-      repr(rows[12][TCOL:TCOL + TWIDTH]))
+      rows[15][TCOL:TCOL + TWIDTH] == (big_cmd[(start_row + 1) * TWIDTH:] + " " * TWIDTH)[:TWIDTH],
+      repr(rows[15][TCOL:TCOL + TWIDTH]))
 # cursor cell: the blank cell just past the last char (active_cur == len)
 # -> reverse-video on the field tone, on the correct wrapped line
 active_cur = len(big_cmd)
 nrows = (len(big_cmd) + TWIDTH - 1) // TWIDTH
 start_row = min(len(big_cmd) // TWIDTH - 1, nrows - 2)
-cur_row = 11 + (active_cur // TWIDTH - start_row)
+cur_row = 14 + (active_cur // TWIDTH - start_row)
 cur_col = TCOL + (active_cur % TWIDTH)
 check("wizlay: active cmd fill + cursor",
-      attrs[11][66] == 7 and attrs[cur_row][cur_col] == 7 | curses.A_REVERSE,
-      (attrs[11][66], attrs[cur_row][cur_col], cur_row, cur_col))
+      attrs[14][TCOL + TWIDTH - 1] == 7 and attrs[cur_row][cur_col] == (7 | curses.A_REVERSE),
+      (attrs[14][TCOL + TWIDTH - 1], attrs[cur_row][cur_col], cur_row, cur_col))
 check("wizlay: long cmd no oob", oob == 0, oob)
 
-# error lands on the bottom border row (row 15): type a reserved name,
+# error lands on the bottom border row (row 18): type a reserved name,
 # confirm it (error shows, name re-prompted), then Esc — last frame carries it
 res, rows, attrs, oob = wiz_grid(K("selected", ENTER, [ESC]))
-check("wizlay: error on bottom border row", "name 'selected' is reserved" in rows[15],
-      repr(rows[15]))
+check("wizlay: error on bottom border row", "name 'selected' is reserved" in rows[18],
+      repr(rows[18]))
 check("wizlay: error no oob", oob == 0, oob)
 
 # ---------- full main() ----------
@@ -266,7 +266,7 @@ keys1 = (
     + K("e", ENTER, BSP * 2, "nd2", ENTER, BSP * 9, "echo new1 --flag", ENTER)   # edit (keep name)
     + K("q", "q")                                 # quit
 )
-scr = FakeScr(24, 80, keys1)
+scr = FakeScr(30, 120, keys1)
 jt.main(scr)
 data = json.load(open(jt.COMMANDS_FILE))
 check("main: new saved", "new1" in data)
@@ -308,12 +308,12 @@ check("main: right col has a gap",
 # left column: 1-based numbers in front of each name
 check("main: numbered names", " 1 a" in grid and " 2 b" in grid and " 3 c" in grid, grid[:300])
 # log section anchored to the bottom: 2 rows of content right above the footer
-# (FakeScr 24x80: sh=23, main_row=10, log_h=3 -> Log: at 19, lines at 20-21, footer 22)
-row = [r.lstrip("\u2502 ") for r in rows]   # drop the left border
-check("main: log header anchored to bottom", row[19].startswith("Log:"), repr(row[19]))
+# (FakeScr 30x120: sh=29, main_row=10, log_h=3 -> Log: at 25, lines at 26-27, footer 28)
+row = [r.lstrip("│ ") for r in rows]   # drop the left border
+check("main: log header anchored to bottom", row[25].startswith("Log:"), repr(row[25]))
 check("main: log lines sit right above footer",
-      row[20].startswith("[command]") and row[21].startswith("[command]"),
-      row[20:22])
+      row[26].startswith("[command]") and row[27].startswith("[command]"),
+      row[26:28])
 check("main: footer selected", "selected: new1" in grid)
 check("main: log lines", "[command] saved 'new1'" in grid
       and "[command] updated 'new1'" in grid)
@@ -323,11 +323,11 @@ check("main: log lines", "[command] saved 'new1'" in grid
 json.dump({"selected": "a", "a": {"desc": "d", "cmd": "echo a"},
            "b": {"desc": "d2", "cmd": "echo b"}}, open(jt.COMMANDS_FILE, "w"))
 # escape sequences: [A=up [B=down [C=right [D=left (91='[')
-scrA = FakeScr(24, 80, [27, 91, 66, 27, 91, 65, ord("q")])  # down, up, quit
+scrA = FakeScr(30, 120, [27, 91, 66, 27, 91, 65, ord("q")])  # down, up, quit
 jt.main(scrA)
 dataA = json.load(open(jt.COMMANDS_FILE))
 check("main: raw arrow seqs navigate", dataA.get("selected") == "a", dataA.get("selected"))
-scrB = FakeScr(24, 80, [curses.KEY_DOWN, curses.KEY_UP, 27, 91, 67, ord("q")])
+scrB = FakeScr(30, 120, [curses.KEY_DOWN, curses.KEY_UP, 27, 91, 67, ord("q")])
 jt.main(scrB)
 dataB = json.load(open(jt.COMMANDS_FILE))
 check("main: keypad arrows + right-arrow noquit", dataB.get("selected") == "a",
@@ -346,7 +346,7 @@ keys2 = (
     + K("d", "y")                                   # delete, confirm (a gone, b highlighted)
     + K("q", "q")
 )
-scr2 = FakeScr(24, 80, keys2)
+scr2 = FakeScr(30, 120, keys2)
 jt.main(scr2)
 data2 = json.load(open(jt.COMMANDS_FILE))
 names2 = [k for k in data2 if k != "selected"]
@@ -368,7 +368,7 @@ check("dup: different base", jt._dup_name("b", {"a": {}, "b": {}}) == "b copy")
 json.dump({"selected": "a",
            "a": {"desc": "first desc", "cmd": "echo a"},
            "b": {"desc": "second desc", "cmd": "echo b"}}, open(jt.COMMANDS_FILE, "w"))
-scrD = FakeScr(24, 80, K("c", ENTER, ENTER, ENTER, "q"))
+scrD = FakeScr(30, 120, K("c", ENTER, ENTER, ENTER, "q"))
 jt.main(scrD)
 dataD = json.load(open(jt.COMMANDS_FILE))
 namesD = [k for k in dataD if k != "selected"]
@@ -386,7 +386,7 @@ json.dump({"selected": "a",
            "a": {"desc": "", "cmd": "echo a"},
            "a copy": {"desc": "", "cmd": "x"},
            "b": {"desc": "", "cmd": "echo b"}}, open(jt.COMMANDS_FILE, "w"))
-scrD2 = FakeScr(24, 80, K("c", ENTER, ENTER, ENTER, "q"))
+scrD2 = FakeScr(30, 120, K("c", ENTER, ENTER, ENTER, "q"))
 jt.main(scrD2)
 dataD2 = json.load(open(jt.COMMANDS_FILE))
 check("main: duplicate name bumped",
@@ -456,7 +456,7 @@ os.utime(new_log, (2000, 2000))
 json.dump({"selected": "a", "a": {"desc": "d", "cmd": "echo a"}},
           open(jt.COMMANDS_FILE, "w"))
 CLIP.clear()
-scrC = FakeScr(24, 80, K("l", "q"))
+scrC = FakeScr(30, 120, K("l", "q"))
 jt.main(scrC)
 check("copy: path sent to clipboard", CLIP == [new_log], CLIP)
 gridC = "\n".join("".join(r) for r in scrC.grid)
@@ -469,18 +469,21 @@ os.rmdir(jt.LOG_DIR)
 # main(): 'l' with no logs -> error line
 json.dump({"selected": "a", "a": {"desc": "d", "cmd": "echo a"}},
           open(jt.COMMANDS_FILE, "w"))
-scrC2 = FakeScr(24, 80, K("l", "q"))
+scrC2 = FakeScr(30, 120, K("l", "q"))
 jt.main(scrC2)
 gridC2 = "\n".join("".join(r) for r in scrC2.grid)
 check("copy: no-logs error", f"[err] no log files in {jt.LOG_DIR}" in gridC2, gridC2[-300:])
 check("copy: no-logs no oob", scrC2.ooobad == 0, scrC2.ooobad)
 
-# ---------- narrow screen smoke ----------
+# ---------- below-minimum screen: notice instead of the UI ----------
 json.dump({"selected": "a", "a": {"desc": "d", "cmd": "echo a"},
            "b": {"desc": "second", "cmd": "echo b"}}, open(jt.COMMANDS_FILE, "w"))
-scr_n = FakeScr(12, 40, K("dnq"))  # delete+cancel, quit
+scr_n = FakeScr(24, 80, K("dnq"))   # under the notice: d/n ignored (wait for resize), q quits
 jt.main(scr_n)
-check("main: narrow screen ok", scr_n.ooobad == 0, scr_n.ooobad)
+grid_n = "\n".join("".join(r) for r in scr_n.grid)
+check("min: notice shown", "window too small" in grid_n and "29 rows x 116 cols" in grid_n, grid_n[:200])
+check("min: no full UI", "DESCRIPTION / COMMAND" not in grid_n)
+check("min: quit works from notice", scr_n.ooobad == 0, scr_n.ooobad)
 
 # ---------- tiny screen smoke (must not crash) ----------
 scr3 = FakeScr(8, 20, K("q"))
@@ -489,6 +492,41 @@ try:
     check("main: tiny screen ok", scr3.ooobad == 0, scr3.ooobad)
 except Exception as e:
     check("main: tiny screen ok", False, repr(e))
+
+# ---------- footer version ----------
+json.dump({"selected": "a", "a": {"desc": "d", "cmd": "echo a"}},
+          open(jt.COMMANDS_FILE, "w"))
+scrV = FakeScr(30, 120, K("q"))
+jt.main(scrV)
+gridV = "\n".join("".join(r) for r in scrV.grid)
+check("footer: version bottom-left", f"Jumpstart TUI v{jt.__version__}" in gridV, gridV[-300:])
+check("footer: no oob", scrV.ooobad == 0, scrV.ooobad)
+
+# ---------- wizard closes on window resize ----------
+json.dump({"selected": "a", "a": {"desc": "first desc", "cmd": "echo a"},
+           "b": {"desc": "second", "cmd": "echo b"}}, open(jt.COMMANDS_FILE, "w"))
+# 'n' opens the wizard, KEY_RESIZE arrives while the name field is open ->
+# the box closes, nothing is saved (same contract as Esc)
+scrR = FakeScr(30, 120, K("n", "resize-me", curses.KEY_RESIZE, "q"))
+jt.main(scrR)
+dataR = json.load(open(jt.COMMANDS_FILE))
+check("resize: wizard closed, nothing saved",
+      set(k for k in dataR if k != "selected") == {"a", "b"} and dataR.get("selected") == "a",
+      (list(dataR), dataR.get("selected")))
+check("resize: no oob", scrR.ooobad == 0, scrR.ooobad)
+# delete confirm box: KEY_RESIZE cancels, nothing deleted
+scrR2 = FakeScr(30, 120, K("d", curses.KEY_RESIZE, "q"))
+jt.main(scrR2)
+dataR2 = json.load(open(jt.COMMANDS_FILE))
+check("resize: confirm cancelled, nothing deleted",
+      set(k for k in dataR2 if k != "selected") == {"a", "b"},
+      list(dataR2))
+
+# ---------- --version flag (headless) ----------
+out = subprocess.run([sys.executable, "jumpstart_tui.py", "--version"],
+                     capture_output=True, text=True)
+check("--version flag", out.returncode == 0 and out.stdout.strip() == f"Jumpstart TUI v{jt.__version__}",
+      (out.returncode, out.stdout.strip(), out.stderr.strip()))
 
 print(f"\n{len(passed)}/{len(passed) + len(failed)} passed")
 if failed:

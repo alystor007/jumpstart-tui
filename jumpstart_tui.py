@@ -32,6 +32,8 @@ import subprocess
 import sys
 import textwrap
 
+__version__ = "1.1.0"   # bump in the same commit as the git tag
+
 # ============================================================
 #  SCRIPTS
 # ============================================================
@@ -271,13 +273,15 @@ def _copy_to_clipboard(text: str) -> tuple[bool, str]:
 
 def _prompt_key(stdscr) -> str | tuple[str, str] | None:
     """Read one key and resolve it into a line-editor action: 'esc',
-    'enter', 'backspace', 'delete', 'left', 'right', 'home', 'end', 'sel'
-    (Ctrl+V toggles selection), or ('char', ch). Arrow keys arrive as keypad constants (KEY_LEFT, ...) or
+    'enter', 'resize', 'backspace', 'delete', 'left', 'right', 'home',
+    'end', 'sel' (Ctrl+V toggles selection), or ('char', ch). Arrow keys arrive as keypad constants (KEY_LEFT, ...) or
     as raw ESC [ C/D sequences; both are decoded here so they can never
     corrupt the text buffer."""
     c = stdscr.getch()
     if c == -1:
         return "timeout"
+    if c == curses.KEY_RESIZE:
+        return "resize"
     if c in (10, 13, curses.KEY_ENTER):
         return "enter"
     if c in (8, 127, curses.KEY_BACKSPACE, curses.KEY_DC):
@@ -355,11 +359,17 @@ def _main_getch(stdscr) -> int | str:
     return 27       # unrecognized sequence: treat as Esc
 
 
+# Sentinel returned by _edit_loop when the window is resized (distinct from
+# a string: a user could literally type "resize" into a field).
+_RESIZED = object()
+
+
 def _edit_loop(stdscr, initial: str, render) -> str | None:
     """Shared line-editor loop. `render(text, cur, sel)` draws the current
     state (the wizard redraws its whole box; it owns the layout); `sel` is
     a (start, end) selection range or None. Returns the stripped text on
-    Enter, None on Esc. The buffer is unbounded — render() decides which
+    Enter, None on Esc, _RESIZED on a window resize. The buffer is
+    unbounded — render() decides which
     slice is visible. Arrows move the cursor (extending the selection in
     select mode); Ctrl+V toggles select mode; Backspace/Delete and typed
     characters clear an active selection. Selection is per-field and never
@@ -382,6 +392,8 @@ def _edit_loop(stdscr, initial: str, render) -> str | None:
                 pass
             elif act == "esc":
                 return None
+            elif act == "resize":
+                return _RESIZED
             elif act == "enter":
                 return text.strip()
             elif act == "sel":
@@ -568,6 +580,8 @@ def command_wizard(stdscr, sh, sw, commands, old_name="", desc="", cmd="") -> tu
         res = _edit_loop(stdscr, values[key], render)
         if res is None:
             return None
+        if res is _RESIZED:
+            return None   # window resized: close the box, nothing is saved
         if key == "name":
             err = _name_error(res, commands, old_name)
             if err:
@@ -610,6 +624,8 @@ def confirm(stdscr, sh, sw, question: str) -> bool:
     try:
         while True:
             c = stdscr.getch()
+            if c == curses.KEY_RESIZE:
+                return False   # window resized: cancel, nothing is deleted
             if c in (ord("y"), ord("Y")):
                 return True
             if c in (ord("n"), ord("N"), ord("q"), 27):
@@ -650,6 +666,19 @@ HELP_TEXT = [
     "  Commands: ~/.config/jumpstart/commands.json",
     "  Output:   ~/.local/state/jumpstart/logs/<name>-<ts>.log",
 ]
+
+
+# Minimum window that can render the full layout — border, banner, hint,
+# the main area with the ? help overlay (the tallest content, 14 lines),
+# log panel, footer. Below this, the TUI shows a "window too small" notice
+# instead of a broken layout; the check re-runs every frame, so a live
+# resize in either direction is picked up automatically. Derived from the
+# render's own math: MIN_COLS from the hint line (109 chars at col PAD +
+# border margin); MIN_ROWS from the worst-case row stack (banner block
+# through 14 help lines, the log separator row, the 3-row log panel, the
+# footer).
+MIN_ROWS = 29
+MIN_COLS = 116
 
 
 def main(stdscr):
@@ -702,6 +731,28 @@ def main(stdscr):
         def divider(row):
             if row < sh:
                 stdscr.addnstr(row, 0, ("─" * sw), sw)
+
+        # Too small for the layout: a notice instead of a broken UI. The
+        # wizard/confirm boxes are blocking modals, so they are never open
+        # here; Esc/q quit (any other key just waits for a resize). The
+        # size check re-runs every frame, so resizing back to a usable
+        # size restores the full UI automatically.
+        if h < MIN_ROWS or w < MIN_COLS:
+            border(stdscr, h, w)
+            if h >= 7:
+                msg = (f"window too small — minimum required: "
+                       f"{MIN_ROWS} rows x {MIN_COLS} cols")
+                sub = "resize the window to continue   [q] Quit"
+                r = h // 2 - 1
+                stdscr.addnstr(r, max(0, (w - len(msg)) // 2), msg, w,
+                               curses.color_pair(2) | curses.A_BOLD)
+                stdscr.addnstr(r + 1, max(0, (w - len(sub)) // 2), sub, w,
+                               curses.color_pair(4))
+            stdscr.refresh()
+            key = _main_getch(stdscr)
+            if key in (ord("q"), 27):
+                break
+            continue
 
         # ASCII title: "JUMP" (header) + "START" (body) — clamped to the
         # safe height AND width so small screens never get out-of-bounds
@@ -810,9 +861,13 @@ def main(stdscr):
 
         stdscr.addnstr(sh - 1, 0, ("─" * sw), sw)   # footer (never last row)
         border(stdscr, h, w)
+        # footer: version bottom-left; theme/selected note right-aligned on
+        # the same row (truncated so it never overruns into the version)
+        ver = f"Jumpstart TUI v{__version__} "
         note = f" theme: {theme} [t]   selected: {selected or '-'} "
-        if len(note) > w:
-            note = "…" + note[1 - w:]   # keep the right (most useful) part
+        if len(note) > w - len(ver):
+            note = "…" + note[1 - (w - len(ver)):]   # keep the right part
+        stdscr.addnstr(sh - 1, 1, ver, w, curses.color_pair(4) | curses.A_BOLD)
         stdscr.addnstr(sh - 1, max(0, w - len(note)), note, min(len(note), w),
                        curses.color_pair(4) | curses.A_BOLD)
 
@@ -949,6 +1004,9 @@ def main(stdscr):
 
 
 if __name__ == "__main__":
+    if "--version" in sys.argv[1:]:
+        print(f"Jumpstart TUI v{__version__}")
+        sys.exit(0)
     try:
         curses.wrapper(main)
     except KeyboardInterrupt:

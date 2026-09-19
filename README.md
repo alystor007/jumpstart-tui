@@ -36,6 +36,17 @@ Run the TUI:
 python3 jumpstart_tui.py
 ```
 
+Show the version (works without a terminal):
+
+```
+python3 jumpstart_tui.py --version
+```
+
+The TUI needs at least **29 rows × 116 cols** — below that it shows a
+"window too small" notice instead of a broken layout, and recovers
+automatically when you resize back. The wizard and delete boxes close on a
+window resize (nothing is saved or deleted).
+
 Standalone launcher:
 
 ```
